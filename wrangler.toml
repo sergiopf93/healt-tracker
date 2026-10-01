@@ -2,11 +2,11 @@ name = "health-tracker-private-api"
 main = "backend/worker.mjs"
 compatibility_date = "2026-10-01"
 
-# Completa database_id después de crear la base D1 desde tu cuenta de Cloudflare.
+# Base D1 creada en Cloudflare para persistir los datos de Health Tracker.
 [[d1_databases]]
 binding = "DB"
 database_name = "health-tracker"
-database_id = "REPLACE_WITH_CLOUDFLARE_D1_DATABASE_ID"
+database_id = "a3d0bb3f-2500-4092-9173-f5e480d9e7df"
 migrations_dir = "backend/migrations"
 
 [vars]
