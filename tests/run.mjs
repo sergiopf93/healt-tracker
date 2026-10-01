@@ -6,6 +6,7 @@ import {
   percentageChange, deriveMetrics, setManualObservations
 } from "../src/domain.mjs";
 import { parseHealthData, parseHealthDataParam } from "../src/integrations/apple-health/parser.mjs";
+import { APPLE_HEALTH_SHORTCUT_NAME, attachShortcutImport, buildAppleHealthShortcutUrl, createShortcutDraft, isShortcutDraftFresh, manualEntriesFromDraft } from "../src/integrations/apple-health/shortcut.mjs";
 import { LocalRepository, makeExport } from "../src/data/repository.mjs";
 
 const tests = [];
@@ -105,6 +106,30 @@ test("Apple Health parser rejects malformed, ambiguous, oversized, and implausib
   rejects(() => parseHealthData(JSON.stringify({ date: "2026-01-01", data: { Steps: { value: 2, unit: "count" } } })), /compatibles/);
   rejects(() => parseHealthDataParam("?healthData=%7B%7D&healthData=%7B%7D"), /más de un/);
   rejects(() => parseHealthData("x".repeat(33000)), /tamaño/);
+});
+
+test("Apple Health shortcut URL passes the selected date and draft imports only into empty fields", () => {
+  const url = new URL(buildAppleHealthShortcutUrl("2026-01-02"));
+  assert.equal(url.protocol, "shortcuts:");
+  assert.equal(url.hostname, "run-shortcut");
+  assert.equal(url.searchParams.get("name"), APPLE_HEALTH_SHORTCUT_NAME);
+  assert.equal(url.searchParams.get("input"), "text");
+  assert.equal(url.searchParams.get("text"), "2026-01-02");
+  rejects(() => buildAppleHealthShortcutUrl("2026-02-30"), /fecha/);
+
+  const now = Date.now();
+  const draft = createShortcutDraft({ view: "create-cycle", date: "2026-01-02", values: { Weight: "73,5", "Body Mass Index": "" }, now });
+  const parsed = parseHealthData(JSON.stringify({ date: "2026-01-02", data: {
+    Weight: { value: 70, unit: "kg" }, "Body Mass Index": { value: 22, unit: "count" }
+  } }));
+  const attached = attachShortcutImport(draft, parsed, "metric");
+  assert.equal(attached.values.Weight, "73,5");
+  assert.equal(attached.values["Body Mass Index"], "22");
+  assert.equal(attached.healthObservations.length, 2);
+  assert.deepEqual(manualEntriesFromDraft(attached.values, attached.prefilledValues), { Weight: "73,5" });
+  assert.equal(isShortcutDraftFresh(draft, now + 1), true);
+  assert.equal(isShortcutDraftFresh(draft, draft.expiresAt), false);
+  rejects(() => attachShortcutImport(draft, { ...parsed, date: "2026-01-03" }), /no coincide/);
 });
 
 test("JSON export has a stable product envelope without server dependencies", () => {

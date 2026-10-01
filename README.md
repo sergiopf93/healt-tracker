@@ -18,7 +18,7 @@ Crea un ciclo y su medición inicial con al menos un valor real. Las siguientes 
 
 ## Apple Health
 
-La app no integra HealthKit directamente. El atajo existente **health-care - Apple Health** devuelve a la PWA con `?healthData=...`; el receptor valida el JSON, la fecha, unidades y números, y pide confirmar antes de guardar porque el enlace por sí solo no autentica el origen. Tras confirmar, fusiona las observaciones en la medición del día y señala discrepancias para que se resuelvan. Una importación repetida no añade de nuevo los mismos valores. Los campos no compatibles se notifican como omitidos.
+La app no integra HealthKit directamente. Al crear un ciclo o una medición, **Obtener valores de Apple Health** abre el atajo existente **health-care - Apple Health** y le pasa la fecha del formulario. Al volver, la app valida el JSON recibido en `?healthData=...`, muestra los valores en el formulario y no los guarda hasta que se confirma con el botón de guardar. Los campos manuales se conservan; si difieren de Apple Health, se guardan ambos orígenes para resolver la discrepancia. Una importación repetida no añade de nuevo los mismos valores. Los campos no compatibles se notifican como omitidos. La restauración del formulario depende de que iOS vuelva a abrir la misma sesión de la PWA.
 
 El transporte mediante query string es provisional: los datos pueden aparecer brevemente en el historial del navegador o en registros del servidor que entregue la página. La app elimina el parámetro de la barra de direcciones tras recibirlo y el service worker no almacena respuestas que incluyan `healthData`. La capa parser/importación está separada para poder sustituir el transporte sin acoplarlo a la interfaz.
 

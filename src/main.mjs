@@ -2,15 +2,20 @@ import {
   CYCLE_TYPES, METRICS, createCycleRecord, createMeasurement, cycleWeek, daysBetween,
   deriveMetrics, displayUnit, effectiveObservation, fromCanonical, isObservationConflict,
   isValidDateOnly, makeManualBaselineObservations, observationValues, percentageChange,
-  difference, resolveObservation, selectReference, setManualObservations, todayLocalDate
+  difference, parseLocaleNumber, resolveObservation, selectReference, setManualObservations,
+  toCanonical, todayLocalDate
 } from "./domain.mjs";
 import { createRepository, makeExport } from "./data/repository.mjs";
 import { parseHealthDataParam } from "./integrations/apple-health/parser.mjs";
+import {
+  attachShortcutImport, buildAppleHealthShortcutUrl, createShortcutDraft,
+  isShortcutDraftFresh, manualEntriesFromDraft, SHORTCUT_DRAFT_STORAGE_KEY
+} from "./integrations/apple-health/shortcut.mjs";
 
 const app = document.querySelector("#app");
 const numberFormat = new Intl.NumberFormat("es-ES", { maximumFractionDigits: 1 });
 const dateFormat = new Intl.DateTimeFormat("es-ES", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
-const state = { view: "summary", cycleId: null, measurementId: null, comparison: "start", toast: null, toastKind: "info", busy: false };
+const state = { view: "summary", cycleId: null, measurementId: null, comparison: "start", toast: null, toastKind: "info", busy: false, pendingShortcutDraft: null };
 let repository;
 let snapshot = { cycles: [], measurements: [], settings: { units: "metric" } };
 
@@ -266,13 +271,34 @@ function cyclesView() {
   </div>`;
 }
 
-function fieldValue(measurement, metric) {
+function fieldValue(measurement, metric, draft = null) {
+  if (draft && Object.prototype.hasOwnProperty.call(draft.values, metric.id)) return draft.values[metric.id];
   const observation = measurement && effectiveObservation(measurement, metric.id);
   if (!observation) return "";
   return numberFormat.format(fromCanonical(metric.id, observation.value, snapshot.settings.units));
 }
 
-function measurementFields(measurement = null) {
+function incomingObservation(draft, metricId) {
+  return draft && (draft.healthObservations || []).find(observation => observation.metric === metricId) || null;
+}
+
+function hasDraftManualValue(draft, metricId) {
+  if (!draft) return false;
+  const value = draft.values[metricId];
+  return value != null && String(value).trim() !== "" && draft.prefilledValues[metricId] !== String(value);
+}
+
+function draftHasConflict(draft, metricId) {
+  const incoming = incomingObservation(draft, metricId);
+  if (!incoming || !hasDraftManualValue(draft, metricId)) return false;
+  const parsed = parseLocaleNumber(draft.values[metricId]);
+  const metric = metricById(metricId);
+  if (parsed === null || !metric) return false;
+  const canonical = toCanonical(metricId, parsed, displayUnit(metricId, snapshot.settings.units), snapshot.settings.units);
+  return Math.abs(canonical - incoming.value) > 1e-7;
+}
+
+function measurementFields(measurement = null, draft = null) {
   const groups = [
     { title: "Composición corporal", description: "Puedes dejar cualquier campo vacío.", metrics: ["Weight", "Body Fat Percentage", "Lean Body Mass"] },
     { title: "Medidas", description: "Mide siempre en el mismo punto para comparar tendencias.", metrics: ["Waist", "Hips", "Flotadores"] },
@@ -280,9 +306,31 @@ function measurementFields(measurement = null) {
   ];
   return groups.map((group, groupIndex) => `<fieldset class="measurement-group"><legend>${escapeHtml(group.title)}</legend><p class="group-hint">${escapeHtml(group.description)}</p><div class="field-grid">${group.metrics.map(id => {
     const metric = metricById(id);
-    const conflict = measurement && isObservationConflict(observationValues(measurement, id));
-    return `<label class="field ${conflict ? "field-conflict" : ""}"><span>${escapeHtml(metric.label)} <small>${escapeHtml(displayUnit(metric.id, snapshot.settings.units))}</small></span><input type="text" inputmode="decimal" autocomplete="off" name="${escapeHtml(metric.id)}" value="${escapeHtml(fieldValue(measurement, metric))}" placeholder="—" aria-describedby="hint-${groupIndex}-${escapeHtml(metric.id)}"><small id="hint-${groupIndex}-${escapeHtml(metric.id)}" class="field-source">${measurement ? conflict ? "Hay valores de más de un origen" : sourceHint(measurement, id) : ""}</small></label>`;
+    const conflict = isObservationConflict(observationValues(measurement, id)) || draftHasConflict(draft, id);
+    const incoming = incomingObservation(draft, id);
+    let hint = measurement ? conflict ? "Hay valores de más de un origen" : sourceHint(measurement, id) : "";
+    if (incoming) {
+      if (draftHasConflict(draft, id)) hint = `Manual y Apple Health difieren · ${escapeHtml(incoming.sourceName || "Atajo")}: ${escapeHtml(valueWithUnit(id, incoming.value))}`;
+      else if (hasDraftManualValue(draft, id)) hint = `Manual + Apple Health · ${escapeHtml(incoming.sourceName || "Atajo")}`;
+      else hint = `Apple Health · ${escapeHtml(incoming.sourceName || "Atajo")}${incoming.quality === "estimated" ? " · estimación" : ""}`;
+    } else if (!measurement && draft && String(draft.values[id] || "").trim()) hint = "Registro manual";
+    return `<label class="field ${conflict ? "field-conflict" : ""}"><span>${escapeHtml(metric.label)} <small>${escapeHtml(displayUnit(metric.id, snapshot.settings.units))}</small></span><input type="text" inputmode="decimal" autocomplete="off" name="${escapeHtml(metric.id)}" value="${escapeHtml(fieldValue(measurement, metric, draft))}" placeholder="—" aria-describedby="hint-${groupIndex}-${escapeHtml(metric.id)}"><small id="hint-${groupIndex}-${escapeHtml(metric.id)}" class="field-source">${hint}</small></label>`;
   }).join("")}</div></fieldset>`).join("");
+}
+
+function shortcutImportPreview(draft) {
+  if (!draft || !draft.healthObservations || !draft.healthObservations.length) return "";
+  const lines = draft.healthObservations.map(observation => {
+    const metric = metricById(observation.metric);
+    const label = metric ? metric.label : observation.metric;
+    return `<li><span>${escapeHtml(label)}${draftHasConflict(draft, observation.metric) ? " · discrepancia con entrada manual" : ""}</span><strong>${escapeHtml(valueWithUnit(observation.metric, observation.value))}</strong></li>`;
+  }).join("");
+  const ignored = draft.ignoredMetrics.length ? `<p class="small-warning">Se omiten métricas no incluidas: ${escapeHtml(draft.ignoredMetrics.join(", "))}.</p>` : "";
+  return `<section class="shortcut-import-preview" aria-live="polite"><div><strong>Datos recibidos del atajo</strong><span>${escapeHtml(displayDate(draft.importedDate))} · revisa antes de guardar</span></div><ul>${lines}</ul><p>Los valores manuales se conservan. Las discrepancias se guardarán con ambos orígenes para que puedas resolverlas.</p>${ignored}<button class="text-button" type="button" data-action="discard-shortcut-import">Quitar datos importados</button></section>`;
+}
+
+function shortcutButtonMarkup() {
+  return `<div class="shortcut-launch"><button class="button button-secondary" type="button" data-action="launch-health-shortcut">♡ Obtener valores de Apple Health</button><p>Se abrirá Atajos y volverás aquí para revisar los datos antes de guardarlos.</p></div>`;
 }
 
 function sourceHint(measurement, metricId) {
@@ -303,17 +351,23 @@ function conflictMarkup(measurement) {
 }
 
 function createCycleView() {
+  const draft = state.pendingShortcutDraft && state.pendingShortcutDraft.view === "create-cycle" ? state.pendingShortcutDraft : null;
+  const type = draft && draft.type || "deficit";
+  const startDate = draft && draft.startDate || todayLocalDate();
+  const measurementDate = draft && draft.requestedDate || todayLocalDate();
   return `<div class="page-stack form-page">
     <button class="back-button" type="button" data-action="navigate" data-view="cycles">← <span>Ciclos</span></button>
     <div class="page-title-row"><div><p class="eyebrow">EMPEZAR UNA ETAPA</p><h1>Nuevo ciclo</h1><p>Un ciclo a la vez, sin objetivos impuestos.</p></div><span class="step-mark">01</span></div>
     <form id="create-cycle-form" class="form-card">
       <section class="form-section"><h2>El ciclo</h2>
-        <label class="select-field"><span>Tipo de ciclo</span><select name="type" required>${CYCLE_TYPES.map(type => `<option value="${type.id}">${escapeHtml(type.label)}</option>`).join("")}</select></label>
-        <label class="select-field"><span>Fecha de inicio</span><input type="date" name="startDate" value="${todayLocalDate()}" max="${todayLocalDate()}" required><small>Las semanas se cuentan desde esta fecha, aunque el ciclo empezara antes de usar la aplicación.</small></label>
+        <label class="select-field"><span>Tipo de ciclo</span><select name="type" required>${CYCLE_TYPES.map(item => `<option value="${item.id}" ${item.id === type ? "selected" : ""}>${escapeHtml(item.label)}</option>`).join("")}</select></label>
+        <label class="select-field"><span>Fecha de inicio</span><input type="date" name="startDate" value="${escapeHtml(startDate)}" max="${todayLocalDate()}" required><small>Las semanas se cuentan desde esta fecha, aunque el ciclo empezara antes de usar la aplicación.</small></label>
       </section>
       <section class="form-section"><div class="form-heading"><div><h2>Medición inicial</h2><p>Será tu referencia para comparar la evolución. Añade al menos un dato para continuar.</p></div><span class="step-mark soft">02</span></div>
-        <label class="select-field date-field"><span>Fecha real de la medición</span><input type="date" name="measurementDate" value="${todayLocalDate()}" max="${todayLocalDate()}" required><small>Por defecto coincide con el inicio; puedes indicar otra fecha.</small></label>
-        ${measurementFields()}
+        <label class="select-field date-field"><span>Fecha real de la medición</span><input type="date" name="measurementDate" value="${escapeHtml(measurementDate)}" max="${todayLocalDate()}" required><small>Por defecto coincide con el inicio; puedes indicar otra fecha.</small></label>
+        ${shortcutButtonMarkup()}
+        ${shortcutImportPreview(draft)}
+        ${measurementFields(null, draft)}
       </section>
     <div class="form-footer"><p>Duración máxima: <strong>16 semanas</strong>. Cierra el ciclo para empezar otro.</p><button class="button button-primary button-wide" type="submit">Crear ciclo y guardar medición <span aria-hidden="true">↗</span></button></div>
     </form>
@@ -325,7 +379,8 @@ function measurementFormView() {
   if (!cycle) return `<section class="soft-empty spacious"><h2>No hay un ciclo activo</h2><button class="button button-primary" data-action="new-cycle">Crear ciclo</button></section>`;
   const measurement = snapshot.measurements.find(item => item.id === state.measurementId) || null;
   const measurementId = measurement ? measurement.id : "";
-  const measurementDate = measurement ? measurement.date : todayLocalDate();
+  const draft = state.pendingShortcutDraft && state.pendingShortcutDraft.view === "measurement-form" ? state.pendingShortcutDraft : null;
+  const measurementDate = draft && draft.requestedDate || (measurement ? measurement.date : todayLocalDate());
   const isEdit = Boolean(measurement);
   const minDate = cycle.startDate;
   const maxDate = cycle.status === "completed" ? cycle.closedAt : todayLocalDate();
@@ -334,7 +389,7 @@ function measurementFormView() {
     <div class="page-title-row"><div><p class="eyebrow">${isEdit ? "ACTUALIZAR REGISTRO" : "UNA NUEVA OBSERVACIÓN"}</p><h1>${isEdit ? "Editar medición" : "Registrar medición"}</h1><p>Semana ${isEdit ? cycleWeek(cycle.startDate, measurement.date) : cycleWeek(cycle.startDate, todayLocalDate())} del ciclo · los campos son opcionales.</p></div></div>
     ${conflictMarkup(measurement)}
     <form id="measurement-form" class="form-card" data-cycle-id="${escapeHtml(cycle.id)}" data-measurement-id="${escapeHtml(measurementId)}">
-      <section class="form-section"><label class="select-field date-field"><span>Fecha real de la medición</span><input type="date" name="date" value="${escapeHtml(measurementDate)}" min="${escapeHtml(minDate)}" max="${escapeHtml(maxDate)}" required><small>La fecha no cambia la semana prevista del ciclo.</small></label>${measurementFields(measurement)}</section>
+      <section class="form-section"><label class="select-field date-field"><span>Fecha real de la medición</span><input type="date" name="date" value="${escapeHtml(measurementDate)}" min="${escapeHtml(minDate)}" max="${escapeHtml(maxDate)}" required><small>La fecha no cambia la semana prevista del ciclo.</small></label>${shortcutButtonMarkup()}${shortcutImportPreview(draft)}${measurementFields(measurement, draft)}</section>
       <div class="form-footer"><p>Los valores manuales conservan su origen. Dejar un campo vacío mantiene el valor anterior.</p><button class="button button-primary button-wide" type="submit">${isEdit ? "Guardar cambios" : "Guardar medición"} <span aria-hidden="true">↗</span></button></div>
     </form>
   </div>`;
@@ -409,6 +464,94 @@ function formEntries(form) {
   return values;
 }
 
+function readStoredShortcutDraft() {
+  try {
+    const draft = JSON.parse(sessionStorage.getItem(SHORTCUT_DRAFT_STORAGE_KEY) || "null");
+    if (!isShortcutDraftFresh(draft)) {
+      sessionStorage.removeItem(SHORTCUT_DRAFT_STORAGE_KEY);
+      return null;
+    }
+    return draft;
+  } catch {
+    return null;
+  }
+}
+
+function saveStoredShortcutDraft(draft) {
+  try {
+    sessionStorage.setItem(SHORTCUT_DRAFT_STORAGE_KEY, JSON.stringify(draft));
+    state.pendingShortcutDraft = draft;
+    return true;
+  } catch {
+    setToast("No se pudo conservar este formulario para abrir Atajos. Guarda los datos antes de continuar.", "error");
+    updateToastInPlace();
+    return false;
+  }
+}
+
+function clearStoredShortcutDraft() {
+  try { sessionStorage.removeItem(SHORTCUT_DRAFT_STORAGE_KEY); } catch { /* session storage can be unavailable */ }
+  state.pendingShortcutDraft = null;
+}
+
+function restoreShortcutDraft() {
+  const draft = readStoredShortcutDraft();
+  if (!draft) return;
+  state.pendingShortcutDraft = draft;
+  state.view = draft.view;
+  state.cycleId = draft.cycleId;
+  state.measurementId = draft.measurementId;
+  if (!draft.healthObservations || !draft.healthObservations.length) setToast("Borrador restaurado. No se han recibido datos todavía; puedes continuar manualmente o volver a abrir Atajos.", "warning");
+}
+
+function launchAppleHealthFromForm(form) {
+  const formData = new FormData(form);
+  const createCycle = form.id === "create-cycle-form";
+  const date = String(formData.get(createCycle ? "measurementDate" : "date") || "");
+  const draft = createShortcutDraft({
+    view: createCycle ? "create-cycle" : "measurement-form",
+    cycleId: createCycle ? null : form.dataset.cycleId,
+    measurementId: createCycle ? null : form.dataset.measurementId || null,
+    date,
+    values: formEntries(form),
+    type: createCycle ? String(formData.get("type") || "deficit") : null,
+    startDate: createCycle ? String(formData.get("startDate") || "") : null
+  });
+  if (!saveStoredShortcutDraft(draft)) return;
+  window.location.href = buildAppleHealthShortcutUrl(date);
+}
+
+function importedObservationsForMeasurement(measurement, draft) {
+  const result = { ...measurement, observations: { ...measurement.observations } };
+  for (const observation of draft && draft.healthObservations || []) {
+    const values = result.observations[observation.metric] || (result.observations[observation.metric] = []);
+    if (observation.fingerprint && values.some(item => item.fingerprint === observation.fingerprint)) continue;
+    values.push(observation);
+  }
+  return result;
+}
+
+function manualEntriesForForm(form, draft) {
+  const entries = formEntries(form);
+  return draft ? manualEntriesFromDraft(entries, draft.prefilledValues || {}) : entries;
+}
+
+function appendManualValues(measurement, entries, system) {
+  if (!Object.values(entries).some(value => value != null && String(value).trim() !== "")) return measurement;
+  return setManualObservations(measurement, entries, system);
+}
+
+function updateDraftFromCurrentForm(form, draft) {
+  const createCycle = form.id === "create-cycle-form";
+  draft.values = formEntries(form);
+  draft.requestedDate = String(new FormData(form).get(createCycle ? "measurementDate" : "date") || draft.requestedDate);
+  if (createCycle) {
+    draft.type = String(new FormData(form).get("type") || draft.type);
+    draft.startDate = String(new FormData(form).get("startDate") || draft.startDate);
+  }
+  return draft;
+}
+
 async function handleCreateCycle(form) {
   const formData = new FormData(form);
   const startDate = String(formData.get("startDate") || "");
@@ -416,12 +559,16 @@ async function handleCreateCycle(form) {
   if (!isValidDateOnly(startDate) || !isValidDateOnly(measurementDate)) throw new Error("Introduce fechas válidas.");
   if (startDate > todayLocalDate() || measurementDate > todayLocalDate()) throw new Error("Las fechas del ciclo no pueden estar en el futuro.");
   if (measurementDate < startDate) throw new Error("La medición inicial no puede ser anterior al inicio del ciclo.");
-  const observations = makeManualBaselineObservations(formEntries(form), snapshot.settings.units);
+  const draft = state.pendingShortcutDraft && state.pendingShortcutDraft.view === "create-cycle" ? state.pendingShortcutDraft : null;
+  if (draft && draft.healthObservations.length && draft.importedDate !== measurementDate) throw new Error("La fecha debe coincidir con la fecha de los datos importados. Quita los datos o restaura su fecha para continuar.");
+  const manualObservations = makeManualBaselineObservations(manualEntriesForForm(form, draft), snapshot.settings.units);
+  const observations = [...(draft ? draft.healthObservations : []), ...manualObservations];
   const { cycle, measurement } = createCycleRecord({ type: String(formData.get("type")), startDate, baselineDate: measurementDate, baselineObservations: observations });
   await repository.createCycleWithBaseline(cycle, measurement);
   await reloadState();
   state.cycleId = cycle.id;
   state.view = "summary";
+  clearStoredShortcutDraft();
   setToast("Ciclo creado. Tu medición inicial ya está guardada.");
   render();
 }
@@ -433,18 +580,23 @@ async function handleMeasurementSave(form) {
   const date = String(new FormData(form).get("date") || "");
   if (!isValidDateOnly(date) || date < cycle.startDate || date > todayLocalDate() || (cycle.closedAt && date > cycle.closedAt)) throw new Error("La fecha debe estar dentro del ciclo y no puede ser futura.");
   if (cycleWeek(cycle.startDate, date) > cycle.plannedWeeks) throw new Error("El ciclo dura como máximo 16 semanas. Cierra este ciclo antes de registrar otra medición.");
+  const draft = state.pendingShortcutDraft && state.pendingShortcutDraft.view === "measurement-form" ? state.pendingShortcutDraft : null;
+  if (draft && draft.healthObservations.length && draft.importedDate !== date) throw new Error("La fecha debe coincidir con la fecha de los datos importados. Quita los datos o restaura su fecha para continuar.");
   const measurementId = form.dataset.measurementId;
   const existing = snapshot.measurements.find(item => item.id === measurementId) || null;
   const collision = snapshot.measurements.find(item => item.cycleId === cycleId && item.date === date && item.id !== measurementId);
   if (collision) throw new Error("Ya existe una medición para esa fecha. Edítala para mantener un solo registro diario.");
   let measurement = existing
     ? { ...existing, date, observations: { ...existing.observations }, resolutions: { ...existing.resolutions } }
-    : createMeasurement(cycleId, date);
-  measurement = setManualObservations(measurement, formEntries(form), snapshot.settings.units);
+    : createMeasurement(cycleId, date, draft ? draft.healthObservations : []);
+  if (existing && draft) measurement = importedObservationsForMeasurement(measurement, draft);
+  measurement = appendManualValues(measurement, manualEntriesForForm(form, draft), snapshot.settings.units);
+  if (!Object.values(measurement.observations).some(items => items.length)) throw new Error("Añade al menos un valor a la medición.");
   await repository.saveMeasurement(measurement);
   await reloadState();
   state.cycleId = cycleId;
   state.view = "cycle-detail";
+  clearStoredShortcutDraft();
   setToast(existing ? "Cambios guardados." : "Medición guardada.");
   render();
 }
@@ -455,6 +607,17 @@ async function handleImportCallback() {
     imported = parseHealthDataParam(window.location.search);
     if (imported.status === "absent") return;
     window.history.replaceState({}, document.title, `${window.location.pathname}${window.location.hash}`);
+    const pendingDraft = readStoredShortcutDraft();
+    if (pendingDraft) {
+      const updatedDraft = attachShortcutImport(pendingDraft, imported, snapshot.settings.units);
+      state.pendingShortcutDraft = updatedDraft;
+      state.view = updatedDraft.view;
+      state.cycleId = updatedDraft.cycleId;
+      state.measurementId = updatedDraft.measurementId;
+      saveStoredShortcutDraft(updatedDraft);
+      setToast(`${imported.observations.length} valor(es) listos para revisar. Todavía no se han guardado.`);
+      return;
+    }
     const metricNames = imported.observations.map(observation => { const metric = metricById(observation.metric); return metric ? metric.label : observation.metric; }).join(", ");
     if (!window.confirm(`Se han recibido datos para ${displayDate(imported.date)} (${metricNames}). El enlace no demuestra por sí solo que el origen sea Apple Health. ¿Quieres guardarlos en este dispositivo?`)) {
       setToast("Importación cancelada. No se guardaron los datos recibidos.", "warning");
@@ -471,6 +634,7 @@ async function handleImportCallback() {
     setToast(count ? `${count} dato(s) importado(s) para ${displayDate(imported.date)}.${duplicate}${skipped}${conflict}` : `No había datos nuevos para ${displayDate(imported.date)}.${duplicate}${conflict}`, result.conflicts.length ? "warning" : "success");
   } catch (error) {
     window.history.replaceState({}, document.title, `${window.location.pathname}${window.location.hash}`);
+    restoreShortcutDraft();
     setToast(error.message || "No se pudo importar Apple Health.", "error");
   }
 }
@@ -497,8 +661,31 @@ app.addEventListener("click", async event => {
   const action = button.dataset.action;
   try {
     if (action === "navigate") return navigate(button.dataset.view);
-    if (action === "new-cycle") { state.view = "create-cycle"; state.toast = null; render(); return; }
-    if (action === "new-measurement") { state.cycleId = button.dataset.cycleId; state.measurementId = null; state.view = "measurement-form"; render(); return; }
+    if (action === "launch-health-shortcut") {
+      const form = button.closest("form");
+      if (!form || !["create-cycle-form", "measurement-form"].includes(form.id)) throw new Error("Abre la importación desde un formulario de medición.");
+      launchAppleHealthFromForm(form);
+      return;
+    }
+    if (action === "discard-shortcut-import") {
+      const form = button.closest("form");
+      let draft = state.pendingShortcutDraft;
+      if (!form || !draft) return;
+      draft = updateDraftFromCurrentForm(form, draft);
+      for (const [metricId, importedText] of Object.entries(draft.prefilledValues || {})) {
+        if (String(draft.values[metricId] == null ? "" : draft.values[metricId]) === String(importedText)) delete draft.values[metricId];
+      }
+      draft.prefilledValues = {};
+      draft.healthObservations = [];
+      draft.ignoredMetrics = [];
+      delete draft.importedDate;
+      saveStoredShortcutDraft(draft);
+      setToast("Se quitaron los datos importados. Tus entradas manuales siguen en el formulario.", "info");
+      render();
+      return;
+    }
+    if (action === "new-cycle") { clearStoredShortcutDraft(); state.view = "create-cycle"; state.toast = null; render(); return; }
+    if (action === "new-measurement") { clearStoredShortcutDraft(); state.cycleId = button.dataset.cycleId; state.measurementId = null; state.view = "measurement-form"; render(); return; }
     if (action === "edit-measurement") { state.measurementId = button.dataset.measurementId; const item = snapshot.measurements.find(value => value.id === state.measurementId); state.cycleId = item ? item.cycleId : null; state.view = "measurement-form"; render(); return; }
     if (action === "open-cycle") { state.cycleId = button.dataset.cycleId; state.view = "cycle-detail"; state.toast = null; render(); return; }
     if (action === "close-cycle") {
@@ -585,6 +772,7 @@ async function boot() {
   try {
     repository = await createRepository();
     await reloadState();
+    restoreShortcutDraft();
     await handleImportCallback();
     render();
     if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {

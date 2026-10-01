@@ -230,6 +230,18 @@ h2, h3 { letter-spacing: -.03em; }
 .settings-steps { margin: 2px 0 9px; padding-left: 17px; color: #717d74; font-size: 10px; line-height: 1.55; }
 .settings-steps code { color: #45614f; font-size: 9px; }
 .small-warning { padding: 9px 10px; border-radius: 10px; background: #f8f1e8; color: #806e54 !important; font-size: 9px !important; }
+.shortcut-launch { padding: 12px 13px; border: 1px solid #e2e8df; border-radius: 15px; background: #f8faf5; }
+.shortcut-launch .button { margin-top: 0; }
+.shortcut-launch p { margin: 7px 0 0; color: #7c877e; font-size: 10px; line-height: 1.45; }
+.shortcut-import-preview { padding: 14px; border: 1px solid #d8e5d8; border-radius: 15px; background: #f2f7f0; }
+.shortcut-import-preview > div { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 10px; }
+.shortcut-import-preview > div strong { color: #355844; font-size: 12px; }
+.shortcut-import-preview > div span { color: #7b897d; font-size: 10px; }
+.shortcut-import-preview ul { list-style: none; margin: 9px 0; padding: 0; border-top: 1px solid #e0e9de; }
+.shortcut-import-preview li { display: flex; justify-content: space-between; gap: 10px; padding: 7px 0; border-bottom: 1px solid #e0e9de; color: #66766a; font-size: 11px; }
+.shortcut-import-preview li strong { color: var(--ink); white-space: nowrap; }
+.shortcut-import-preview > p:not(.small-warning) { margin: 0 0 7px; color: #7b877d; font-size: 10px; line-height: 1.45; }
+.shortcut-import-preview .text-button { min-height: 32px; }
 .danger-card { border-color: #eee0dc; }
 .danger-card .settings-icon { background: #f5e9e4; color: #a65d4b; }
 .privacy-footer { margin: -3px 4px 8px; color: #909790; font-size: 9px; line-height: 1.55; }
