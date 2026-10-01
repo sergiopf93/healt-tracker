@@ -330,8 +330,8 @@ function shortcutImportPreview(draft) {
 }
 
 function shortcutButtonMarkup(draft = null) {
-  const canPaste = draft && !(draft.healthObservations || []).length;
-  return `<div class="shortcut-launch"><button class="button button-secondary" type="button" data-action="launch-health-shortcut">♡ Obtener valores de Apple Health</button>${canPaste ? `<button class="button button-secondary" type="button" data-action="paste-health-shortcut">Importar valores copiados por Atajos</button>` : ""}<p>${canPaste ? "Al volver desde Atajos, importa aquí los datos copiados para rellenar este formulario." : "Se abrirá Atajos; al terminar, vuelve a esta pantalla para importar los valores."}</p></div>`;
+  const canImport = draft && !(draft.healthObservations || []).length;
+  return `<div class="shortcut-launch"><button class="button button-secondary" type="button" data-action="launch-health-shortcut">♡ Obtener valores de Apple Health</button>${canImport ? `<button class="button button-secondary" type="button" data-action="import-health-file">Importar archivo de Atajos</button><input id="shortcut-health-file" type="file" accept=".json,application/json" hidden>` : ""}<p>${canImport ? "Al volver a Health Tracker, selecciona el JSON que Atajos guardó en Archivos." : "Se abrirá Atajos; al terminar, vuelve aquí para revisar los datos."}</p></div>`;
 }
 
 function sourceHint(measurement, metricId) {
@@ -467,9 +467,9 @@ function formEntries(form) {
 
 function readStoredShortcutDraft() {
   try {
-    const draft = JSON.parse(sessionStorage.getItem(SHORTCUT_DRAFT_STORAGE_KEY) || "null");
+    const draft = JSON.parse(localStorage.getItem(SHORTCUT_DRAFT_STORAGE_KEY) || "null");
     if (!isShortcutDraftFresh(draft)) {
-      sessionStorage.removeItem(SHORTCUT_DRAFT_STORAGE_KEY);
+      localStorage.removeItem(SHORTCUT_DRAFT_STORAGE_KEY);
       return null;
     }
     return draft;
@@ -480,7 +480,7 @@ function readStoredShortcutDraft() {
 
 function saveStoredShortcutDraft(draft) {
   try {
-    sessionStorage.setItem(SHORTCUT_DRAFT_STORAGE_KEY, JSON.stringify(draft));
+    localStorage.setItem(SHORTCUT_DRAFT_STORAGE_KEY, JSON.stringify(draft));
     state.pendingShortcutDraft = draft;
     return true;
   } catch {
@@ -491,7 +491,7 @@ function saveStoredShortcutDraft(draft) {
 }
 
 function clearStoredShortcutDraft() {
-  try { sessionStorage.removeItem(SHORTCUT_DRAFT_STORAGE_KEY); } catch { /* session storage can be unavailable */ }
+  try { localStorage.removeItem(SHORTCUT_DRAFT_STORAGE_KEY); } catch { /* local storage can be unavailable */ }
   state.pendingShortcutDraft = null;
 }
 
@@ -523,19 +523,12 @@ function launchAppleHealthFromForm(form) {
   window.location.href = buildAppleHealthShortcutUrl(date);
 }
 
-async function importShortcutClipboard() {
+async function importShortcutFile(file) {
   const draft = state.pendingShortcutDraft || readStoredShortcutDraft();
   if (!draft) throw new Error("No hay un formulario pendiente. Abre Apple Health desde el formulario que quieres rellenar.");
-  if (!navigator.clipboard || typeof navigator.clipboard.readText !== "function") {
-    throw new Error("Este navegador no permite leer el portapapeles. Vuelve a abrir la app desde su icono en Inicio y prueba de nuevo.");
-  }
-  let text;
-  try {
-    text = await navigator.clipboard.readText();
-  } catch {
-    throw new Error("No se pudo leer el portapapeles. Permite el acceso cuando iOS lo solicite y vuelve a tocar Importar.");
-  }
-  if (!text.trim()) throw new Error("El portapapeles está vacío. Configura el atajo para copiar el JSON antes de terminar.");
+  if (!file) return;
+  const text = await file.text();
+  if (!text.trim()) throw new Error("El archivo está vacío. Comprueba que Atajos guardó el JSON generado.");
   const imported = parseHealthData(text);
   const updatedDraft = attachShortcutImport(draft, imported, snapshot.settings.units);
   state.pendingShortcutDraft = updatedDraft;
@@ -693,8 +686,11 @@ app.addEventListener("click", async event => {
       launchAppleHealthFromForm(form);
       return;
     }
-    if (action === "paste-health-shortcut") {
-      await importShortcutClipboard();
+    if (action === "import-health-file") {
+      const container = button.closest(".shortcut-launch");
+      const input = container && container.querySelector("#shortcut-health-file");
+      if (!input) throw new Error("No se encontró el selector del archivo JSON.");
+      input.click();
       return;
     }
     if (action === "discard-shortcut-import") {
@@ -757,6 +753,16 @@ app.addEventListener("click", async event => {
 });
 
 app.addEventListener("change", async event => {
+  if (event.target.matches("#shortcut-health-file")) {
+    const file = event.target.files && event.target.files[0];
+    try {
+      await importShortcutFile(file);
+    } catch (error) {
+      setToast(error.message || "No se pudo importar el archivo.", "error");
+      render();
+    }
+    return;
+  }
   if (event.target.matches("[data-action='comparison']")) {
     state.comparison = event.target.value;
     render();
