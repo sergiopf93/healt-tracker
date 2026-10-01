@@ -6,7 +6,7 @@ import {
   toCanonical, todayLocalDate
 } from "./domain.mjs";
 import { createRepository, makeExport } from "./data/repository.mjs";
-import { parseHealthDataParam } from "./integrations/apple-health/parser.mjs";
+import { parseHealthData, parseHealthDataParam } from "./integrations/apple-health/parser.mjs";
 import {
   attachShortcutImport, buildAppleHealthShortcutUrl, createShortcutDraft,
   isShortcutDraftFresh, manualEntriesFromDraft, SHORTCUT_DRAFT_STORAGE_KEY
@@ -329,8 +329,9 @@ function shortcutImportPreview(draft) {
   return `<section class="shortcut-import-preview" aria-live="polite"><div><strong>Datos recibidos del atajo</strong><span>${escapeHtml(displayDate(draft.importedDate))} · revisa antes de guardar</span></div><ul>${lines}</ul><p>Los valores manuales se conservan. Las discrepancias se guardarán con ambos orígenes para que puedas resolverlas.</p>${ignored}<button class="text-button" type="button" data-action="discard-shortcut-import">Quitar datos importados</button></section>`;
 }
 
-function shortcutButtonMarkup() {
-  return `<div class="shortcut-launch"><button class="button button-secondary" type="button" data-action="launch-health-shortcut">♡ Obtener valores de Apple Health</button><p>Se abrirá Atajos y volverás aquí para revisar los datos antes de guardarlos.</p></div>`;
+function shortcutButtonMarkup(draft = null) {
+  const canPaste = draft && !(draft.healthObservations || []).length;
+  return `<div class="shortcut-launch"><button class="button button-secondary" type="button" data-action="launch-health-shortcut">♡ Obtener valores de Apple Health</button>${canPaste ? `<button class="button button-secondary" type="button" data-action="paste-health-shortcut">Importar valores copiados por Atajos</button>` : ""}<p>${canPaste ? "Al volver desde Atajos, importa aquí los datos copiados para rellenar este formulario." : "Se abrirá Atajos; al terminar, vuelve a esta pantalla para importar los valores."}</p></div>`;
 }
 
 function sourceHint(measurement, metricId) {
@@ -365,7 +366,7 @@ function createCycleView() {
       </section>
       <section class="form-section"><div class="form-heading"><div><h2>Medición inicial</h2><p>Será tu referencia para comparar la evolución. Añade al menos un dato para continuar.</p></div><span class="step-mark soft">02</span></div>
         <label class="select-field date-field"><span>Fecha real de la medición</span><input type="date" name="measurementDate" value="${escapeHtml(measurementDate)}" max="${todayLocalDate()}" required><small>Por defecto coincide con el inicio; puedes indicar otra fecha.</small></label>
-        ${shortcutButtonMarkup()}
+        ${shortcutButtonMarkup(draft)}
         ${shortcutImportPreview(draft)}
         ${measurementFields(null, draft)}
       </section>
@@ -389,7 +390,7 @@ function measurementFormView() {
     <div class="page-title-row"><div><p class="eyebrow">${isEdit ? "ACTUALIZAR REGISTRO" : "UNA NUEVA OBSERVACIÓN"}</p><h1>${isEdit ? "Editar medición" : "Registrar medición"}</h1><p>Semana ${isEdit ? cycleWeek(cycle.startDate, measurement.date) : cycleWeek(cycle.startDate, todayLocalDate())} del ciclo · los campos son opcionales.</p></div></div>
     ${conflictMarkup(measurement)}
     <form id="measurement-form" class="form-card" data-cycle-id="${escapeHtml(cycle.id)}" data-measurement-id="${escapeHtml(measurementId)}">
-      <section class="form-section"><label class="select-field date-field"><span>Fecha real de la medición</span><input type="date" name="date" value="${escapeHtml(measurementDate)}" min="${escapeHtml(minDate)}" max="${escapeHtml(maxDate)}" required><small>La fecha no cambia la semana prevista del ciclo.</small></label>${shortcutButtonMarkup()}${shortcutImportPreview(draft)}${measurementFields(measurement, draft)}</section>
+      <section class="form-section"><label class="select-field date-field"><span>Fecha real de la medición</span><input type="date" name="date" value="${escapeHtml(measurementDate)}" min="${escapeHtml(minDate)}" max="${escapeHtml(maxDate)}" required><small>La fecha no cambia la semana prevista del ciclo.</small></label>${shortcutButtonMarkup(draft)}${shortcutImportPreview(draft)}${measurementFields(measurement, draft)}</section>
       <div class="form-footer"><p>Los valores manuales conservan su origen. Dejar un campo vacío mantiene el valor anterior.</p><button class="button button-primary button-wide" type="submit">${isEdit ? "Guardar cambios" : "Guardar medición"} <span aria-hidden="true">↗</span></button></div>
     </form>
   </div>`;
@@ -518,7 +519,32 @@ function launchAppleHealthFromForm(form) {
     startDate: createCycle ? String(formData.get("startDate") || "") : null
   });
   if (!saveStoredShortcutDraft(draft)) return;
+  render();
   window.location.href = buildAppleHealthShortcutUrl(date);
+}
+
+async function importShortcutClipboard() {
+  const draft = state.pendingShortcutDraft || readStoredShortcutDraft();
+  if (!draft) throw new Error("No hay un formulario pendiente. Abre Apple Health desde el formulario que quieres rellenar.");
+  if (!navigator.clipboard || typeof navigator.clipboard.readText !== "function") {
+    throw new Error("Este navegador no permite leer el portapapeles. Vuelve a abrir la app desde su icono en Inicio y prueba de nuevo.");
+  }
+  let text;
+  try {
+    text = await navigator.clipboard.readText();
+  } catch {
+    throw new Error("No se pudo leer el portapapeles. Permite el acceso cuando iOS lo solicite y vuelve a tocar Importar.");
+  }
+  if (!text.trim()) throw new Error("El portapapeles está vacío. Configura el atajo para copiar el JSON antes de terminar.");
+  const imported = parseHealthData(text);
+  const updatedDraft = attachShortcutImport(draft, imported, snapshot.settings.units);
+  state.pendingShortcutDraft = updatedDraft;
+  state.view = updatedDraft.view;
+  state.cycleId = updatedDraft.cycleId;
+  state.measurementId = updatedDraft.measurementId;
+  saveStoredShortcutDraft(updatedDraft);
+  setToast(`${imported.observations.length} valor(es) listos para revisar. Todavía no se han guardado.`);
+  render();
 }
 
 function importedObservationsForMeasurement(measurement, draft) {
@@ -665,6 +691,10 @@ app.addEventListener("click", async event => {
       const form = button.closest("form");
       if (!form || !["create-cycle-form", "measurement-form"].includes(form.id)) throw new Error("Abre la importación desde un formulario de medición.");
       launchAppleHealthFromForm(form);
+      return;
+    }
+    if (action === "paste-health-shortcut") {
+      await importShortcutClipboard();
       return;
     }
     if (action === "discard-shortcut-import") {
