@@ -11,6 +11,7 @@ export const METRICS = [
   { id: "Body Fat Percentage", label: "Grasa corporal", unit: "%", dimension: "percent", health: true, estimate: true },
   { id: "Lean Body Mass", label: "Masa libre de grasa", unit: "kg", dimension: "mass", health: true, estimate: true },
   { id: "Resting Calories", label: "TMB · energía en reposo", unit: "kcal", dimension: "energy", health: true, estimate: true },
+  { id: "Steps", label: "Media de pasos semanal", unit: "pasos/día", dimension: "count", health: true },
   { id: "Body Mass Index", label: "IMC", unit: "count", dimension: "index", health: true, estimate: true },
   { id: "Waist", label: "Cintura", unit: "cm", dimension: "length" },
   { id: "Hips", label: "Cadera", unit: "cm", dimension: "length" },
@@ -139,6 +140,24 @@ export function effectiveObservation(measurement, metricId) {
   if (resolutionId) return observations.find(item => item.id === resolutionId) || null;
   if (isObservationConflict(observations)) return null;
   return observations.find(item => item.source === "manual") || observations[0];
+}
+
+export function averageMetricByCycleWeek(measurements, metricId, cycleStartDate) {
+  const buckets = new Map();
+  for (const measurement of measurements) {
+    const observation = effectiveObservation(measurement, metricId);
+    if (!observation) continue;
+    const week = cycleWeek(cycleStartDate, measurement.date);
+    const bucket = buckets.get(week) || { week, total: 0, count: 0 };
+    bucket.total += observation.value;
+    bucket.count += 1;
+    buckets.set(week, bucket);
+  }
+  return [...buckets.values()].sort((a, b) => a.week - b.week).map(bucket => ({
+    week: bucket.week,
+    value: bucket.total / bucket.count,
+    count: bucket.count
+  }));
 }
 
 export function setManualObservations(measurement, entries, system = "metric") {

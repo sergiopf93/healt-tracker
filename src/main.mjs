@@ -1,11 +1,12 @@
 import {
   CYCLE_TYPES, METRICS, createCycleRecord, createMeasurement, cycleWeek, daysBetween,
-  deriveMetrics, displayUnit, effectiveObservation, fromCanonical, isObservationConflict,
+  averageMetricByCycleWeek, deriveMetrics, displayUnit, effectiveObservation, fromCanonical, isObservationConflict,
   isValidDateOnly, makeManualBaselineObservations, observationValues, percentageChange,
   difference, parseLocaleNumber, resolveObservation, selectReference, setManualObservations,
   toCanonical, todayLocalDate
 } from "./domain.mjs";
 import { createRepository, makeExport } from "./data/repository.mjs";
+import { readRemoteConfig, RemoteRepository, REMOTE_CONFIG_KEY } from "./data/remote-repository.mjs";
 import { parseHealthData, parseHealthDataParam } from "./integrations/apple-health/parser.mjs";
 import {
   attachShortcutImport, buildAppleHealthShortcutUrl, createShortcutDraft,
@@ -15,7 +16,7 @@ import {
 const app = document.querySelector("#app");
 const numberFormat = new Intl.NumberFormat("es-ES", { maximumFractionDigits: 1 });
 const dateFormat = new Intl.DateTimeFormat("es-ES", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
-const state = { view: "summary", cycleId: null, measurementId: null, comparison: "start", toast: null, toastKind: "info", busy: false, pendingShortcutDraft: null };
+const state = { view: "summary", cycleId: null, measurementId: null, comparison: "start", toast: null, toastKind: "info", busy: false, pendingShortcutDraft: null, remoteConnected: false, chartFocus: {} };
 let repository;
 let snapshot = { cycles: [], measurements: [], settings: { units: "metric" } };
 
@@ -92,7 +93,7 @@ function shell(content) {
           <span class="brand-mark" aria-hidden="true"><span></span></span>
           <span>health<span class="brand-light">tracker</span></span>
         </a>
-        <span class="privacy-chip"><span class="privacy-dot"></span> Solo en este dispositivo</span>
+        <span class="privacy-chip"><span class="privacy-dot"></span> ${state.remoteConnected ? "Sincronizado en privado" : "Solo en este dispositivo"}</span>
       </header>
       <main id="main-content" class="main-content" tabindex="-1">${content}</main>
       ${toastMarkup()}
@@ -167,46 +168,86 @@ function readingSummary(measurement) {
 function chartFor(cycle, metricIds, title, subtitle) {
   const measurements = allCycleMeasurements(cycle.id);
   const colors = ["#c87557", "#5f8271", "#7886a0", "#d0a85e"];
-  const left = 26, right = 314, top = 14, bottom = 118;
+  const left = 42, right = 292, top = 18, bottom = 132;
   const horizon = Math.max(16, cycleWeek(cycle.startDate, cycle.closedAt || todayLocalDate()));
   const series = metricIds.map((metricId, seriesIndex) => {
-    const values = measurements.flatMap(measurement => {
-      const observation = effectiveObservation(measurement, metricId);
-      return observation ? [{ measurement, metricId, value: observation.value, week: cycleWeek(cycle.startDate, measurement.date) }] : [];
-    }).sort((a, b) => a.week - b.week || a.measurement.date.localeCompare(b.measurement.date));
-    const shownValues = values.map(point => fromCanonical(metricId, point.value, snapshot.settings.units));
-    const minimum = shownValues.length ? Math.min(...shownValues) : 0;
-    const maximum = shownValues.length ? Math.max(...shownValues) : 1;
-    const range = maximum - minimum || Math.max(Math.abs(maximum) * 0.16, 1);
+    let values;
+    if (metricId === "Steps") {
+      values = averageMetricByCycleWeek(measurements, metricId, cycle.startDate).map(point => ({
+        metricId, week: point.week, value: point.value, count: point.count,
+        xRatio: Math.max(0, Math.min(1, (point.week - 0.5) / horizon))
+      }));
+    } else {
+      values = measurements.flatMap(measurement => {
+        const observation = effectiveObservation(measurement, metricId);
+        return observation ? [{ metricId, measurement, value: observation.value, week: cycleWeek(cycle.startDate, measurement.date) }] : [];
+      }).sort((a, b) => a.week - b.week || a.measurement.date.localeCompare(b.measurement.date));
+    }
+    const side = ["Body Fat Percentage", "Steps"].includes(metricId) ? "right" : "left";
     const coords = values.map(point => ({
       ...point,
-      x: left + Math.max(0, Math.min(1, daysBetween(cycle.startDate, point.measurement.date) / Math.max(1, horizon * 7 - 1))) * (right - left),
-      y: bottom - ((fromCanonical(metricId, point.value, snapshot.settings.units) - minimum + range * 0.08) / (range * 1.16)) * (bottom - top)
+      shown: fromCanonical(metricId, point.value, snapshot.settings.units),
+      x: left + (point.xRatio == null ? Math.max(0, Math.min(1, daysBetween(cycle.startDate, point.measurement.date) / Math.max(1, horizon * 7 - 1))) : point.xRatio) * (right - left)
     }));
+    return { metricId, color: colors[seriesIndex % colors.length], coords, points: values.length, side };
+  });
+  const points = series.reduce((sum, item) => sum + item.points, 0);
+  const chartId = `${cycle.id}-${metricIds.join("-")}`;
+  const selected = state.chartFocus[chartId] || [];
+  const focusActive = selected.length > 0;
+  const palette = Object.fromEntries(series.map(item => [item.metricId, item.color]));
+  const legend = series.map(item => {
+    const pressed = focusActive ? selected.includes(item.metricId) : true;
+    return `<button class="legend-item ${pressed ? "" : "is-dimmed"}" type="button" data-action="focus-series" data-chart-id="${escapeHtml(chartId)}" data-series-id="${escapeHtml(item.metricId)}" aria-pressed="${pressed}"><i style="--series-color:${item.color}"></i>${escapeHtml(metricById(item.metricId).label)}${metricById(item.metricId).estimate ? " · estimación" : ""}</button>`;
+  }).join("");
+  const visibleSeries = series;
+  const valuesForSide = side => visibleSeries.filter(item => item.side === side).flatMap(item => item.coords.map(point => point.shown));
+  const domainFor = side => {
+    const values = valuesForSide(side);
+    const min = values.length ? Math.min(...values) : 0;
+    const max = values.length ? Math.max(...values) : 1;
+    const padding = max === min ? Math.max(Math.abs(max) * 0.12, 1) : (max - min) * 0.12;
+    return [min - padding, max + padding];
+  };
+  const leftDomain = domainFor("left");
+  const rightDomain = domainFor("right");
+  const leftMetricSeries = visibleSeries.find(item => item.side === "left");
+  const rightMetricSeries = visibleSeries.find(item => item.side === "right");
+  const leftMetricId = leftMetricSeries ? leftMetricSeries.metricId : metricIds[0];
+  const rightMetricId = rightMetricSeries ? rightMetricSeries.metricId : null;
+  for (const item of series) {
+    const [minimum, maximum] = item.side === "left" ? leftDomain : rightDomain;
+    for (const point of item.coords) point.y = bottom - ((point.shown - minimum) / (maximum - minimum)) * (bottom - top);
+  }
+  const ticks = [0, 0.5, 1].map(fraction => {
+    const y = bottom - fraction * (bottom - top);
+    const leftValue = leftDomain[0] + fraction * (leftDomain[1] - leftDomain[0]);
+    const rightValue = rightDomain[0] + fraction * (rightDomain[1] - rightDomain[0]);
+    return `<g><line x1="${left}" y1="${y}" x2="${right}" y2="${y}" stroke="#e8e7e0" stroke-dasharray="3 5"/><text x="${left - 5}" y="${y + 3}" text-anchor="end" fill="#888980" font-size="8">${numberFormat.format(leftValue)}</text>${rightMetricId ? `<text x="${right + 5}" y="${y + 3}" text-anchor="start" fill="#888980" font-size="8">${numberFormat.format(rightValue)}</text>` : ""}</g>`;
+  }).join("");
+  const xTicks = [1, 4, 8, 12, 16].filter(week => week <= horizon).map(week => {
+    const x = left + ((week - 1) / Math.max(1, horizon - 1)) * (right - left);
+    return `<text x="${x}" y="${bottom + 14}" text-anchor="middle" fill="#888980" font-size="9">S${week}</text>`;
+  }).join("");
+  const plotted = visibleSeries.map(item => {
     const segments = [];
     let segment = [];
-    for (const point of coords) {
-      if (segment.length && point.week - segment[segment.length - 1].week > 1) {
-        segments.push(segment);
-        segment = [];
-      }
+    for (const point of item.coords) {
+      if (segment.length && point.week - segment[segment.length - 1].week > 1) { segments.push(segment); segment = []; }
       segment.push(point);
     }
     if (segment.length) segments.push(segment);
-    const paths = segments.filter(items => items.length > 1).map(items => `<path d="${items.map((point, index) => `${index ? "L" : "M"}${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(" ")}" fill="none" stroke="${colors[seriesIndex % colors.length]}" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"/>`).join("");
-    const dots = coords.map(point => `<circle cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="4.5" fill="#fff" stroke="${colors[seriesIndex % colors.length]}" stroke-width="2.5"><title>${escapeHtml(metricById(metricId).label)} · ${escapeHtml(displayDate(point.measurement.date))}: ${escapeHtml(valueWithUnit(metricId, point.value))}</title></circle>`).join("");
-    return { metricId, color: colors[seriesIndex % colors.length], markup: `${paths}${dots}`, coords, points: values.length, minimum, maximum };
-  });
-  const points = series.reduce((sum, item) => sum + item.points, 0);
-  const legend = series.map(item => `<span class="legend-item"><i class="series-${item.metricId.replace(/[^a-z0-9]/gi, "-")}"></i>${escapeHtml(metricById(item.metricId).label)}${metricById(item.metricId).estimate ? " · estimación" : ""}</span>`).join("");
-  const ticks = [1, 4, 8, 12, 16].filter(week => week <= horizon).map(week => {
-    const x = left + ((week - 1) / Math.max(1, horizon - 1)) * (right - left);
-    return `<g><line x1="${x}" y1="${top}" x2="${x}" y2="${bottom}" stroke="#e8e7e0" stroke-dasharray="3 5"/><text x="${x}" y="${bottom + 14}" text-anchor="middle" fill="#888980" font-size="9">S${week}</text></g>`;
+    const paths = segments.filter(group => group.length > 1).map(group => `<path d="${group.map((point, index) => `${index ? "L" : "M"}${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(" ")}" fill="none" stroke="${palette[item.metricId]}" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"/>`).join("");
+    const dots = item.coords.map(point => {
+      const when = point.measurement ? displayDate(point.measurement.date) : `Semana ${point.week}`;
+      return `<circle cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="4.2" fill="#fff" stroke="${palette[item.metricId]}" stroke-width="2.5"><title>${escapeHtml(metricById(item.metricId).label)} · ${escapeHtml(when)}: ${escapeHtml(valueWithUnit(item.metricId, point.value))}${item.metricId === "Steps" ? ` · media de ${point.count} ${point.count === 1 ? "día" : "días"}` : ""}</title></circle>`;
+    }).join("");
+    return `<g class="chart-series-markup" opacity="${focusActive && !selected.includes(item.metricId) ? "0.12" : "1"}">${paths}${dots}</g>`;
   }).join("");
-  const list = series.flatMap(item => item.coords.map(point => `<li><span>${escapeHtml(metricById(item.metricId).label)} · semana ${point.week} · ${escapeHtml(displayDate(point.measurement.date))}</span><strong>${escapeHtml(valueWithUnit(item.metricId, point.value))}</strong></li>`)).join("");
+  const list = series.flatMap(item => item.coords.map(point => `<li><span>${escapeHtml(metricById(item.metricId).label)} · semana ${point.week}${point.measurement ? ` · ${escapeHtml(displayDate(point.measurement.date))}` : point.metricId === "Steps" ? ` · media de ${point.count} días` : ""}</span><strong>${escapeHtml(valueWithUnit(item.metricId, point.value))}</strong></li>`)).join("");
   return `<section class="chart-card">
     <div class="section-heading"><div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(subtitle)}</p></div><span class="chart-count">${points} ${points === 1 ? "dato" : "datos"}</span></div>
-    ${points ? `<div class="chart-wrap">${series.filter(item => item.points).map(item => `<div class="chart-series"><p>${escapeHtml(metricById(item.metricId).label)} <span>· escala ${formatValue(item.metricId, item.minimum, snapshot.settings.units)}–${formatValue(item.metricId, item.maximum, snapshot.settings.units)} ${escapeHtml(displayUnit(item.metricId, snapshot.settings.units))}</span></p><svg viewBox="0 0 330 145" role="img" aria-label="${escapeHtml(metricById(item.metricId).label)} durante el ciclo. Los segmentos se interrumpen en las semanas sin medición."><title>${escapeHtml(metricById(item.metricId).label)}</title>${ticks}${item.markup}</svg></div>`).join("")}</div><div class="chart-legend">${legend}</div><details class="chart-data"><summary>Ver mediciones y fechas</summary><ul>${list}</ul></details>` : `<div class="chart-empty"><span aria-hidden="true">⌁</span><p>La evolución aparecerá cuando haya mediciones.</p></div>`}
+    ${points ? `<div class="chart-wrap"><svg viewBox="0 0 330 158" role="img" aria-label="${escapeHtml(title)} durante el ciclo. Las series comparten el tiempo y usan las escalas indicadas a los lados."><title>${escapeHtml(title)}</title>${ticks}${xTicks}${plotted}<text x="${left}" y="10" fill="#788078" font-size="8">${escapeHtml(displayUnit(leftMetricId, snapshot.settings.units))}</text>${rightMetricId ? `<text x="${right}" y="10" text-anchor="end" fill="#788078" font-size="8">${escapeHtml(displayUnit(rightMetricId, snapshot.settings.units))}</text>` : ""}<text x="${(left + right) / 2}" y="154" text-anchor="middle" fill="#888980" font-size="9">Semana del ciclo</text></svg></div><div class="chart-legend">${legend}</div><details class="chart-data"><summary>Ver mediciones y fechas</summary><ul>${list}</ul></details>` : `<div class="chart-empty"><span aria-hidden="true">⌁</span><p>La evolución aparecerá cuando haya mediciones.</p></div>`}
   </section>`;
 }
 
@@ -240,8 +281,9 @@ function summaryView() {
       ${latest ? `<p class="reference-caption">Ahora · ${escapeHtml(displayDate(latest.date))} <span>vs.</span> ${escapeHtml(reference ? `${compareLabel} · ${displayDate(reference.date)}` : compareLabel)}</p>${reference ? `<div class="comparison-rows">${["Weight", "Body Fat Percentage", "Lean Body Mass", "Resting Calories"].map(metric => metricDiffRow(metric, latest, reference)).join("")}</div>` : `<div class="soft-empty compact"><p>${state.comparison === "start" ? "Aún no existe una medición inicial." : "Sin medición para esta semana."}</p><span>No interpolamos ni rellenamos huecos.</span></div>`}` : `<div class="soft-empty compact"><p>La comparación aparecerá con tu primera medición.</p></div>`}
     </section>
     <div class="section-title"><div><p class="eyebrow">TENDENCIAS</p><h2>Lo que va cambiando</h2></div><span class="trend-note">Sin nota de aprobado</span></div>
-    ${chartFor(cycle, ["Weight", "Body Fat Percentage"], "Grasa y peso", "Valores observados a lo largo del ciclo")}
-    ${chartFor(cycle, ["Lean Body Mass", "Resting Calories"], "Masa y metabolismo", "La báscula puede estimar estos valores")}
+    ${chartFor(cycle, ["Weight", "Lean Body Mass", "Body Fat Percentage"], "Peso y composición corporal", "Peso y masa libre de grasa en kg · grasa corporal en %")}
+    ${chartFor(cycle, ["Resting Calories", "Steps"], "TMB y pasos", "TMB por registro · media de los días con dato por semana del ciclo")}
+    ${chartFor(cycle, ["Waist", "Hips", "Flotadores"], "Medidas corporales", "Cintura, cadera y flotadores en la unidad elegida")}
     <p class="quiet-note">Las cifras de composición corporal de básculas domésticas son estimaciones. Observa tendencias en condiciones de medición similares.</p>
   </div>`;
 }
@@ -331,7 +373,7 @@ function shortcutImportPreview(draft) {
 
 function shortcutButtonMarkup(draft = null) {
   const canImport = draft && !(draft.healthObservations || []).length;
-  return `<div class="shortcut-launch"><button class="button button-secondary" type="button" data-action="launch-health-shortcut">♡ Obtener valores de Apple Health</button>${canImport ? `<button class="button button-secondary" type="button" data-action="import-health-file">Importar archivo de Atajos</button><input id="shortcut-health-file" type="file" hidden>` : ""}<p>${canImport ? "Al volver a Health Tracker, selecciona el JSON que Atajos guardó en Archivos." : "Se abrirá Atajos; al terminar, vuelve aquí para revisar los datos."}</p></div>`;
+  return `<div class="shortcut-launch"><button class="button button-secondary" type="button" data-action="launch-health-shortcut">♡ Obtener valores de Apple Health</button>${canImport && !state.remoteConnected ? `<button class="button button-secondary" type="button" data-action="import-health-file">Importar archivo de Atajos</button><input id="shortcut-health-file" type="file" hidden>` : ""}<p>${state.remoteConnected ? "El Atajo enviará el JSON al backend. Al volver, se cargarán los valores en este formulario." : canImport ? "Al volver a Health Tracker, selecciona el JSON que Atajos guardó en Archivos." : "Se abrirá Atajos; al terminar, vuelve aquí para revisar los datos."}</p></div>`;
 }
 
 function sourceHint(measurement, metricId) {
@@ -404,10 +446,11 @@ function detailView() {
   const reference = latest && selectReference(measurements, latest, cycle, state.comparison);
   return `<div class="page-stack">
     <button class="back-button" type="button" data-action="navigate" data-view="cycles">← <span>Todos los ciclos</span></button>
-    <section class="detail-hero ${cycle.status === "active" ? "" : "is-closed"}"><div class="cycle-hero-top"><span class="status-pill ${cycle.status === "active" ? "" : "status-complete"}"><i></i>${cycle.status === "active" ? "Ciclo activo" : "Ciclo cerrado"}</span><span class="cycle-type">${escapeHtml(typeLabel(cycle.type))}</span></div><h1>${escapeHtml(typeLabel(cycle.type))}</h1><p>${escapeHtml(displayDate(cycle.startDate))}${cycle.closedAt ? ` — ${escapeHtml(displayDate(cycle.closedAt))}` : ` · Semana ${cycleWeek(cycle.startDate, todayLocalDate())}`}</p>${cycle.status === "active" ? `<div class="detail-actions"><button class="button button-primary" data-action="new-measurement" data-cycle-id="${escapeHtml(cycle.id)}">＋ Registrar medición</button><button class="text-button" data-action="close-cycle" data-cycle-id="${escapeHtml(cycle.id)}">Cerrar ciclo</button></div>` : ""}</section>
+    <section class="detail-hero ${cycle.status === "active" ? "" : "is-closed"}"><div class="cycle-hero-top"><span class="status-pill ${cycle.status === "active" ? "" : "status-complete"}"><i></i>${cycle.status === "active" ? "Ciclo activo" : "Ciclo cerrado"}</span><span class="cycle-type">${escapeHtml(typeLabel(cycle.type))}</span></div><h1>${escapeHtml(typeLabel(cycle.type))}</h1><p>${escapeHtml(displayDate(cycle.startDate))}${cycle.closedAt ? ` — ${escapeHtml(displayDate(cycle.closedAt))}` : ` · Semana ${cycleWeek(cycle.startDate, todayLocalDate())}`}</p>${cycle.status === "active" ? `<div class="detail-actions"><button class="button button-primary" data-action="new-measurement" data-cycle-id="${escapeHtml(cycle.id)}">＋ Registrar medición</button><button class="text-button" data-action="close-cycle" data-cycle-id="${escapeHtml(cycle.id)}">Cerrar ciclo</button></div>` : `<div class="detail-actions"><button class="button button-danger" data-action="delete-cycle" data-cycle-id="${escapeHtml(cycle.id)}">Eliminar ciclo cerrado</button></div>`}</section>
     <section class="comparison-panel"><div class="panel-heading compare-heading"><div><p class="eyebrow">COMPARACIÓN</p><h2>Una referencia real</h2></div><label class="select-wrap"><span class="sr-only">Comparar con</span><select data-action="comparison">${comparisonOptions(cycle, latest || { date: cycle.startDate })}</select><span aria-hidden="true">⌄</span></label></div>${latest && reference ? `<p class="reference-caption">${displayDate(latest.date)} vs. ${displayDate(reference.date)}</p><div class="comparison-rows">${["Weight", "Body Fat Percentage", "Lean Body Mass", "Resting Calories"].map(metric => metricDiffRow(metric, latest, reference)).join("")}</div>` : `<div class="soft-empty compact"><p>${latest ? state.comparison === "start" ? "No hay medición inicial." : "Sin medición para esta semana." : "Este ciclo todavía no tiene mediciones."}</p></div>`}</section>
-    ${chartFor(cycle, ["Weight", "Body Fat Percentage"], "Grasa y peso", "Las semanas sin medición aparecen como huecos")}
-    ${chartFor(cycle, ["Lean Body Mass", "Resting Calories"], "Masa y metabolismo", "Composición corporal: estimación")}
+    ${chartFor(cycle, ["Weight", "Lean Body Mass", "Body Fat Percentage"], "Peso y composición corporal", "Peso y masa libre de grasa en kg · grasa corporal en %")}
+    ${chartFor(cycle, ["Resting Calories", "Steps"], "TMB y pasos", "TMB por registro · media de los días con dato por semana del ciclo")}
+    ${chartFor(cycle, ["Waist", "Hips", "Flotadores"], "Medidas corporales", "Cintura, cadera y flotadores en la unidad elegida")}
     <section class="timeline-section"><div class="section-title"><div><p class="eyebrow">REGISTROS</p><h2>Mediciones</h2></div><span class="chart-count">${measurements.length}</span></div>
       ${measurements.length ? `<ol class="measurement-timeline">${measurements.slice().reverse().map(measurement => {
         const week = cycleWeek(cycle.startDate, measurement.date);
@@ -420,13 +463,15 @@ function detailView() {
 }
 
 function settingsView() {
+  const remote = readRemoteConfig();
   return `<div class="page-stack">
     <div class="page-title-row"><div><p class="eyebrow">PREFERENCIAS</p><h1>Ajustes</h1><p>Tu experiencia, a tu manera.</p></div></div>
     <section class="settings-card"><div class="settings-icon" aria-hidden="true">↔</div><div class="settings-copy"><h2>Unidades</h2><p>Elige cómo ver tus medidas. Tus datos guardados no cambian.</p><label class="settings-select"><span class="sr-only">Sistema de unidades</span><select id="units-setting"><option value="metric" ${snapshot.settings.units === "metric" ? "selected" : ""}>Métrico · kg, cm</option><option value="imperial" ${snapshot.settings.units === "imperial" ? "selected" : ""}>Anglosajón · lb, in</option></select></label></div></section>
-    <section class="settings-card"><div class="settings-icon health-icon" aria-hidden="true">♡</div><div class="settings-copy"><p class="eyebrow">PUENTE MANUAL</p><h2>Apple Health</h2><p>Esta PWA no accede directamente a HealthKit. Tu atajo de Apple Health envía los datos a esta página.</p><div class="shortcut-name">health-care - Apple Health</div><ul class="settings-steps"><li>Abre el ciclo y registra su fecha real.</li><li>Ejecuta el atajo con esa fecha en formato <code>AAAA-MM-DD</code>.</li><li>Al volver a esta aplicación, revisa los valores importados.</li></ul><p class="small-warning">El parámetro de URL es provisional y puede aparecer en el historial del navegador. La app lo elimina de la barra de direcciones tras procesarlo.</p></div></section>
+    <section class="settings-card"><div class="settings-icon health-icon" aria-hidden="true">♡</div><div class="settings-copy"><p class="eyebrow">PUENTE MANUAL</p><h2>Apple Health</h2><p>El atajo envía los valores directamente al backend privado. Al volver a la app, se cargan en el ciclo abierto.</p><div class="shortcut-name">health-care - Apple Health</div><ul class="settings-steps"><li>Configura la URL del backend y el token aquí.</li><li>En el Atajo, añade <b>Obtener contenido de URL</b> con método POST a <code>/api/import</code>, cabecera <code>Authorization: Bearer …</code> y el JSON como cuerpo.</li><li>Deja al final <b>Abrir app → Health Tracker</b>. La app sincroniza al volver al primer plano.</li></ul></div></section>
+    <section class="settings-card backend-card"><div class="settings-icon" aria-hidden="true">↗</div><div class="settings-copy"><h2>Backend privado</h2><p>El endpoint y token se guardan solo en este navegador. Configura el mismo token como secreto de Cloudflare y en la cabecera del Atajo.</p><form id="backend-config-form" class="backend-config-form"><label><span>URL del Worker</span><input name="endpoint" type="url" inputmode="url" placeholder="https://health-tracker-private-api.…workers.dev" value="${escapeHtml(remote && remote.endpoint || "")}" required></label><label><span>Token de acceso</span><input name="token" type="password" autocomplete="new-password" placeholder="${remote ? "Configurado; déjalo vacío para conservarlo" : "Pega el token que configurarás en Cloudflare"}" ${remote ? "" : "required"}></label><button class="button button-primary" type="submit">${remote ? "Guardar conexión" : "Conectar backend"}</button><small>El nivel gratuito tiene cuotas. No se activa ningún plan de pago desde la aplicación.</small></form></div></section>
     <section class="settings-card"><div class="settings-icon" aria-hidden="true">↓</div><div class="settings-copy"><h2>Exportar tus datos</h2><p>Descarga una copia JSON con tus ciclos, observaciones y preferencias.</p><button class="button button-secondary" type="button" data-action="export">Descargar copia</button></div></section>
-    <section class="settings-card danger-card"><div class="settings-icon" aria-hidden="true">⌫</div><div class="settings-copy"><h2>Eliminar todos los datos</h2><p>Borra ciclos, mediciones y preferencias de este navegador. No se puede deshacer.</p><button class="button button-danger" type="button" data-action="delete-all">Eliminar datos</button></div></section>
-    <p class="privacy-footer">Health Tracker no envía tus mediciones a servidores, no incluye analítica y no utiliza rastreadores. Los datos permanecen en este navegador; limpiar los datos del sitio también puede borrarlos.</p>
+    <section class="settings-card danger-card"><div class="settings-icon" aria-hidden="true">⌫</div><div class="settings-copy"><h2>Eliminar todos los datos</h2><p>${state.remoteConnected ? "Borra todos los ciclos, mediciones y preferencias del backend y de este navegador. No se puede deshacer." : "Borra ciclos, mediciones y preferencias de este navegador. No se puede deshacer."}</p><button class="button button-danger" type="button" data-action="delete-all">Eliminar datos</button></div></section>
+    <p class="privacy-footer">${state.remoteConnected ? "Con backend conectado, tus mediciones se envían a Cloudflare D1 y se mantienen también en este navegador. Sin backend, permanecen solo localmente." : "Sin backend conectado, tus mediciones permanecen solo en este navegador. Configurar el backend las sincronizará de forma privada."} La conexión no usa analítica ni rastreadores.</p>
   </div>`;
 }
 
@@ -584,6 +629,7 @@ async function handleCreateCycle(form) {
   const observations = [...(draft ? draft.healthObservations : []), ...manualObservations];
   const { cycle, measurement } = createCycleRecord({ type: String(formData.get("type")), startDate, baselineDate: measurementDate, baselineObservations: observations });
   await repository.createCycleWithBaseline(cycle, measurement);
+  if (repository.pendingImport) await repository.clearPendingImport();
   await reloadState();
   state.cycleId = cycle.id;
   state.view = "summary";
@@ -612,6 +658,7 @@ async function handleMeasurementSave(form) {
   measurement = appendManualValues(measurement, manualEntriesForForm(form, draft), snapshot.settings.units);
   if (!Object.values(measurement.observations).some(items => items.length)) throw new Error("Añade al menos un valor a la medición.");
   await repository.saveMeasurement(measurement);
+  if (repository.pendingImport) await repository.clearPendingImport();
   await reloadState();
   state.cycleId = cycleId;
   state.view = "cycle-detail";
@@ -706,6 +753,7 @@ app.addEventListener("click", async event => {
       draft.ignoredMetrics = [];
       delete draft.importedDate;
       saveStoredShortcutDraft(draft);
+      if (repository.pendingImport) await repository.clearPendingImport();
       setToast("Se quitaron los datos importados. Tus entradas manuales siguen en el formulario.", "info");
       render();
       return;
@@ -724,6 +772,28 @@ app.addEventListener("click", async event => {
       render();
       return;
     }
+    if (action === "delete-cycle") {
+      const cycle = snapshot.cycles.find(item => item.id === button.dataset.cycleId);
+      if (!cycle || cycle.status === "active") throw new Error("Solo se pueden eliminar ciclos cerrados.");
+      if (!window.confirm("Se eliminará este ciclo cerrado y todas sus mediciones. No se puede deshacer. ¿Continuar?")) return;
+      await repository.deleteCycle(cycle.id);
+      await reloadState();
+      state.cycleId = null;
+      state.view = "cycles";
+      setToast("Ciclo cerrado y sus mediciones eliminados.");
+      render();
+      return;
+    }
+    if (action === "focus-series") {
+      const chartId = button.dataset.chartId;
+      const seriesId = button.dataset.seriesId;
+      const selected = new Set(state.chartFocus[chartId] || []);
+      if (selected.has(seriesId)) selected.delete(seriesId);
+      else selected.add(seriesId);
+      state.chartFocus[chartId] = [...selected];
+      render();
+      return;
+    }
     if (action === "resolve-conflict") {
       const measurement = snapshot.measurements.find(item => item.id === button.dataset.measurementId);
       if (!measurement) throw new Error("No se encontró la medición.");
@@ -738,7 +808,7 @@ app.addEventListener("click", async event => {
     }
     if (action === "export") { await exportData(); return; }
     if (action === "delete-all") {
-      if (!window.confirm("Se eliminarán todos los ciclos y mediciones de este navegador. ¿Continuar?")) return;
+      if (!window.confirm(state.remoteConnected ? "Se eliminarán todos los ciclos y mediciones del backend y de este navegador. ¿Continuar?" : "Se eliminarán todos los ciclos y mediciones de este navegador. ¿Continuar?")) return;
       await repository.deleteAll();
       await reloadState();
       state.view = "summary";
@@ -779,6 +849,23 @@ app.addEventListener("change", async event => {
 });
 
 app.addEventListener("submit", async event => {
+  if (event.target.matches("#backend-config-form")) {
+    event.preventDefault();
+    const form = event.target;
+    const endpoint = String(new FormData(form).get("endpoint") || "").trim().replace(/\/$/, "");
+    const token = String(new FormData(form).get("token") || "").trim() || (readRemoteConfig() || {}).token;
+    try {
+      const parsed = new URL(endpoint);
+      if (parsed.protocol !== "https:" && parsed.hostname !== "localhost") throw new Error("La URL del backend debe usar HTTPS.");
+      if (!token || token.length < 32) throw new Error("El token debe tener al menos 32 caracteres aleatorios.");
+      localStorage.setItem(REMOTE_CONFIG_KEY, JSON.stringify({ endpoint, token }));
+      window.location.reload();
+    } catch (error) {
+      setToast(error.message || "No se pudo guardar la conexión.", "error");
+      updateToastInPlace();
+    }
+    return;
+  }
   if (!event.target.matches("#create-cycle-form, #measurement-form")) return;
   event.preventDefault();
   if (state.busy) return;
@@ -805,10 +892,18 @@ app.addEventListener("input", event => {
 });
 
 async function boot() {
+  let remoteConfig = null;
   try {
-    repository = await createRepository();
+    const localRepository = await createRepository();
+    remoteConfig = readRemoteConfig();
+    repository = remoteConfig ? new RemoteRepository(localRepository, remoteConfig) : localRepository;
+    if (remoteConfig) {
+      await repository.connect();
+      state.remoteConnected = true;
+    }
     await reloadState();
     restoreShortcutDraft();
+    if (remoteConfig && repository.pendingImport) await attachPendingBackendImport();
     await handleImportCallback();
     render();
     if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
@@ -818,8 +913,54 @@ async function boot() {
       });
     }
   } catch (error) {
-    app.innerHTML = `<main class="storage-error"><div class="brand-mark" aria-hidden="true"><span></span></div><p class="eyebrow">HEALTH TRACKER</p><h1>No se pudo abrir el almacenamiento local</h1><p>${escapeHtml(error.message || "Prueba a abrir la aplicación desde Safari o un navegador actualizado.")}</p><p>Tus datos no se han modificado.</p></main>`;
+    if (remoteConfig) {
+      app.innerHTML = `<main class="storage-error connection-recovery"><div class="brand-mark" aria-hidden="true"><span></span></div><p class="eyebrow">HEALTH TRACKER</p><h1>No se pudo conectar con el backend</h1><p>${escapeHtml(error.message || "Comprueba la conexión, la URL y el token.")}</p><p>Los datos remotos no se han modificado. Corrige el acceso y vuelve a intentar.</p><form id="backend-config-form" class="backend-config-form"><label><span>URL del Worker</span><input name="endpoint" type="url" value="${escapeHtml(remoteConfig.endpoint)}" required></label><label><span>Token de acceso</span><input name="token" type="password" autocomplete="new-password" placeholder="Déjalo vacío para conservar el token actual"></label><button class="button button-primary" type="submit">Guardar y reintentar</button></form></main>`;
+    } else {
+      app.innerHTML = `<main class="storage-error"><div class="brand-mark" aria-hidden="true"><span></span></div><p class="eyebrow">HEALTH TRACKER</p><h1>No se pudo abrir el almacenamiento local</h1><p>${escapeHtml(error.message || "Prueba a abrir la aplicación desde Safari o un navegador actualizado.")}</p><p>Tus datos no se han modificado.</p></main>`;
+    }
   }
 }
+
+async function refreshRemoteState() {
+  if (!state.remoteConnected || state.busy || typeof repository.refresh !== "function") return;
+  try {
+    await repository.refresh();
+    await reloadState();
+    const attached = await attachPendingBackendImport();
+    if (attached || ["summary", "cycles", "cycle-detail"].includes(state.view)) render();
+  } catch {
+    setToast("No se pudo actualizar desde el backend. Se mantienen los datos locales.", "warning");
+    updateToastInPlace();
+  }
+}
+
+async function attachPendingBackendImport() {
+  const imported = repository && repository.pendingImport;
+  if (!imported) return false;
+  const draft = state.pendingShortcutDraft || readStoredShortcutDraft();
+  if (!draft || draft.requestedDate !== imported.date || !isShortcutDraftFresh(draft)) {
+    setToast(`Hay una importación pendiente para ${displayDate(imported.date)}. Abre el formulario de esa medición para recibirla.`, "warning");
+    return false;
+  }
+  try {
+    const updatedDraft = attachShortcutImport(draft, imported, snapshot.settings.units);
+    state.pendingShortcutDraft = updatedDraft;
+    state.view = updatedDraft.view;
+    state.cycleId = updatedDraft.cycleId;
+    state.measurementId = updatedDraft.measurementId;
+    if (!saveStoredShortcutDraft(updatedDraft)) return false;
+    setToast(`${imported.observations.length} valor(es) recibidos del Atajo. Revisa el formulario y guarda la medición.`);
+    return true;
+  } catch (error) {
+    setToast(error.message || "No se pudo recibir la importación pendiente.", "error");
+    return false;
+  }
+}
+
+window.addEventListener("pageshow", refreshRemoteState);
+window.addEventListener("focus", refreshRemoteState);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") refreshRemoteState();
+});
 
 boot();

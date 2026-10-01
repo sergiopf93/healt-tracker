@@ -1,0 +1,14 @@
+name = "health-tracker-private-api"
+main = "backend/worker.mjs"
+compatibility_date = "2026-10-01"
+
+# Completa database_id después de crear la base D1 desde tu cuenta de Cloudflare.
+[[d1_databases]]
+binding = "DB"
+database_name = "health-tracker"
+database_id = "REPLACE_WITH_CLOUDFLARE_D1_DATABASE_ID"
+migrations_dir = "backend/migrations"
+
+[vars]
+# Debe coincidir exactamente con el origen del sitio GitHub Pages.
+APP_ORIGIN = "https://sergiopf93.github.io"

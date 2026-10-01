@@ -2,7 +2,7 @@ import { fromCanonical, isValidDateOnly } from "../../domain.mjs";
 
 export const APPLE_HEALTH_SHORTCUT_NAME = "health-care - Apple Health";
 export const SHORTCUT_DRAFT_STORAGE_KEY = "health-tracker:apple-health-draft:v1";
-export const SHORTCUT_DRAFT_TTL_MS = 10 * 60 * 1000;
+export const SHORTCUT_DRAFT_TTL_MS = 24 * 60 * 60 * 1000;
 
 export function buildAppleHealthShortcutUrl(date) {
   if (!isValidDateOnly(date)) throw new Error("Selecciona una fecha válida antes de abrir Apple Health.");

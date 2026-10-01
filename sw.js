@@ -1,9 +1,9 @@
-const CACHE_NAME = "health-tracker-shell-v1";
+const CACHE_NAME = "health-tracker-shell-v2";
 const BASE_URL = new URL("./", self.location.href);
 const SHELL_FILES = [
   "./", "./index.html", "./manifest.webmanifest", "./src/main.mjs",
-  "./src/domain.mjs", "./src/styles.css", "./src/data/repository.mjs",
-  "./src/integrations/apple-health/parser.mjs", "./icons/app-icon.svg",
+  "./src/domain.mjs", "./src/styles.css", "./src/data/repository.mjs", "./src/data/remote-repository.mjs",
+  "./src/integrations/apple-health/parser.mjs", "./src/integrations/apple-health/shortcut.mjs", "./icons/app-icon.svg",
   "./icons/app-icon-192.png", "./icons/app-icon-512.png", "./icons/apple-touch-icon.png"
 ].map(path => new URL(path, BASE_URL).href);
 

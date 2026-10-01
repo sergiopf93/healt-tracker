@@ -114,6 +114,46 @@ export class LocalRepository {
     });
   }
 
+  async deleteCycle(cycleId) {
+    return new Promise((resolve, reject) => {
+      const tx = this.db.transaction(["cycles", "measurements"], "readwrite");
+      const cycles = tx.objectStore("cycles");
+      const measurements = tx.objectStore("measurements");
+      let failure = null;
+      const cycleRequest = cycles.get(cycleId);
+      const measurementRequest = measurements.index("cycleId").getAll(cycleId);
+      cycleRequest.onsuccess = () => {
+        const cycle = cycleRequest.result;
+        if (!cycle || cycle.status === "active") {
+          failure = new Error(cycle ? "Solo se pueden eliminar ciclos cerrados." : "No se encontró el ciclo.");
+          tx.abort();
+          return;
+        }
+        cycles.delete(cycleId);
+        if (measurementRequest.readyState === "done") measurementRequest.result.forEach(item => measurements.delete(item.id));
+        else measurementRequest.onsuccess = () => measurementRequest.result.forEach(item => measurements.delete(item.id));
+      };
+      cycleRequest.onerror = () => { failure = cycleRequest.error; tx.abort(); };
+      tx.oncomplete = () => resolve();
+      tx.onabort = () => reject(failure || tx.error || new Error("No se pudo eliminar el ciclo."));
+      tx.onerror = () => reject(failure || tx.error || new Error("No se pudo eliminar el ciclo."));
+    });
+  }
+
+  async replaceState(state) {
+    const tx = this.db.transaction(["cycles", "measurements", "settings"], "readwrite");
+    const cycles = tx.objectStore("cycles");
+    const measurements = tx.objectStore("measurements");
+    const settings = tx.objectStore("settings");
+    cycles.clear();
+    measurements.clear();
+    settings.clear();
+    state.cycles.forEach(cycle => cycles.put(cycle));
+    state.measurements.forEach(measurement => measurements.put(measurement));
+    settings.put({ key: "preferences", value: state.settings || { units: "metric" } });
+    await transactionDone(tx);
+  }
+
   importHealthData(imported) {
     return new Promise((resolve, reject) => {
       const tx = this.db.transaction(["cycles", "measurements"], "readwrite");

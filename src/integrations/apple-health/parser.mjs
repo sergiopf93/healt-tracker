@@ -34,6 +34,7 @@ function expectedUnit(metricId, unit) {
   if (metricId === "Weight" || metricId === "Lean Body Mass") return ["kg", "lb", "lbs"].includes(normalized);
   if (metricId === "Body Fat Percentage") return ["%", "percent", "percentage"].includes(normalized);
   if (metricId === "Resting Calories") return ["kcal", "cal", "kilocalories"].includes(normalized);
+  if (metricId === "Steps") return ["steps", "step", "count", "pasos", ""].includes(normalized);
   if (metricId === "Body Mass Index") return ["count", "index", ""].includes(normalized);
   return false;
 }
@@ -44,9 +45,10 @@ function validateRange(metricId, value) {
     "Lean Body Mass": [0, 500],
     "Body Fat Percentage": [0, 100],
     "Resting Calories": [0, 10000],
+    Steps: [0, 100000],
     "Body Mass Index": [0, 100]
   }[metricId];
-  return limits && value > limits[0] && value <= limits[1];
+  return limits && (metricId === "Steps" ? value >= limits[0] : value > limits[0]) && value <= limits[1];
 }
 
 export function parseHealthDataParam(search) {

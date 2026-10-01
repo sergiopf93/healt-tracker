@@ -1,13 +1,14 @@
 import assert from "assert";
 import {
   cycleWeek, daysBetween, isValidDateOnly, parseLocaleNumber, toCanonical, fromCanonical,
-  createCycleRecord, makeManualBaselineObservations, createMeasurement, makeObservation,
+  averageMetricByCycleWeek, createCycleRecord, makeManualBaselineObservations, createMeasurement, makeObservation,
   effectiveObservation, isObservationConflict, resolveObservation, selectReference,
   percentageChange, deriveMetrics, setManualObservations
 } from "../src/domain.mjs";
 import { parseHealthData, parseHealthDataParam } from "../src/integrations/apple-health/parser.mjs";
 import { APPLE_HEALTH_SHORTCUT_NAME, attachShortcutImport, buildAppleHealthShortcutUrl, createShortcutDraft, isShortcutDraftFresh, manualEntriesFromDraft } from "../src/integrations/apple-health/shortcut.mjs";
 import { LocalRepository, makeExport } from "../src/data/repository.mjs";
+import { RemoteRepository } from "../src/data/remote-repository.mjs";
 
 const tests = [];
 function test(name, fn) { tests.push([name, fn]); }
@@ -78,6 +79,17 @@ test("reference selection returns recorded weeks only", () => {
   assert.equal(selectReference([baseline, week3], week3, cycle, "1"), null);
 });
 
+test("weekly step means use cycle-relative seven-day windows and omit unresolved values", () => {
+  const measurements = [
+    createMeasurement("c1", "2026-01-01", [makeObservation({ metric: "Steps", value: 4000, unit: "pasos/día", source: "apple_health" })]),
+    createMeasurement("c1", "2026-01-05", [makeObservation({ metric: "Steps", value: 6000, unit: "pasos/día", source: "apple_health" })]),
+    createMeasurement("c1", "2026-01-08", [makeObservation({ metric: "Steps", value: 8000, unit: "pasos/día", source: "apple_health" })])
+  ];
+  assert.deepEqual(averageMetricByCycleWeek(measurements, "Steps", "2026-01-01"), [
+    { week: 1, value: 5000, count: 2 }, { week: 2, value: 8000, count: 1 }
+  ]);
+});
+
 test("Apple Health JSON parser accepts callback payload and safely canonicalizes values", () => {
   const payload = { date: "2026-01-01", data: {
     Weight: { value: 160, unit: "lb", source: "Scale" },
@@ -86,14 +98,15 @@ test("Apple Health JSON parser accepts callback payload and safely canonicalizes
     Steps: { value: 5000, unit: "count" }
   } };
   const parsed = parseHealthData(JSON.stringify(payload));
-  assert.equal(parsed.observations.length, 3);
-  assert.equal(parsed.ignored[0], "Steps");
+  assert.equal(parsed.observations.length, 4);
+  assert.deepEqual(parsed.ignored, []);
   assert.ok(Math.abs(parsed.observations[0].value - 72.5748) < .001);
   assert.equal(parsed.observations[1].quality, "estimated");
   assert.equal(parsed.observations.find(item => item.metric === "Resting Calories").value, 1600);
   const encoded = encodeURIComponent(JSON.stringify(payload));
   assert.equal(parseHealthDataParam(`?healthData=${encoded}`).date, "2026-01-01");
-  assert.equal(parseHealthDataParam(`?healthData=${encodeURIComponent(encoded)}`).observations.length, 3);
+  assert.equal(parsed.observations.find(item => item.metric === "Steps").unit, "pasos/día");
+  assert.equal(parseHealthDataParam(`?healthData=${encodeURIComponent(encoded)}`).observations.length, 4);
   assert.equal(parseHealthDataParam("").status, "absent");
 });
 
@@ -103,7 +116,8 @@ test("Apple Health parser rejects malformed, ambiguous, oversized, and implausib
   rejects(() => parseHealthData(JSON.stringify({ date: "2026-01-01", data: { Weight: { value: 70, unit: "stones" } } })), /unidad/);
   rejects(() => parseHealthData(JSON.stringify({ date: "2026-01-01", data: { Weight: { value: "70", unit: "kg" } } })), /número/);
   rejects(() => parseHealthData(JSON.stringify({ date: "2026-01-01", data: { "Body Fat Percentage": { value: 120, unit: "%" } } })), /rango/);
-  rejects(() => parseHealthData(JSON.stringify({ date: "2026-01-01", data: { Steps: { value: 2, unit: "count" } } })), /compatibles/);
+  assert.equal(parseHealthData(JSON.stringify({ date: "2026-01-01", data: { Steps: { value: 2, unit: "count" } } })).observations[0].metric, "Steps");
+  assert.equal(parseHealthData(JSON.stringify({ date: "2026-01-01", data: { Steps: { value: 0, unit: "count" } } })).observations[0].value, 0);
   rejects(() => parseHealthDataParam("?healthData=%7B%7D&healthData=%7B%7D"), /más de un/);
   rejects(() => parseHealthData("x".repeat(33000)), /tamaño/);
 });
@@ -182,6 +196,7 @@ class FakeDatabase {
           add(value) { map.set(value.id, JSON.parse(JSON.stringify(value))); tx.touch(); },
           put(value) { map.set(value.id || value.key, JSON.parse(JSON.stringify(value))); tx.touch(); },
           clear() { map.clear(); tx.touch(); },
+          delete(key) { map.delete(key); tx.touch(); },
           index() { return { getAll(key) { return schedule(Array.from(map.values()).filter(value => value.cycleId === key), {}); } }; }
         };
         return store;
@@ -203,6 +218,7 @@ test("repository persists cycles/settings, deduplicates Apple Health and preserv
   const baseline = makeManualBaselineObservations({ Weight: "72" });
   const { cycle, measurement } = createCycleRecord({ type: "deficit", startDate: "2026-01-01", baselineObservations: baseline });
   await repository.createCycleWithBaseline(cycle, measurement);
+  await assert.rejects(repository.deleteCycle(cycle.id), /Solo se pueden eliminar ciclos cerrados/);
   const imported = parseHealthData(JSON.stringify({ date: "2026-01-01", data: { Weight: { value: 70, unit: "kg", source: "Health Scale" }, "Body Fat Percentage": { value: 24, unit: "%" } } }));
   const first = await repository.importHealthData(imported);
   assert.equal(first.added, 2);
@@ -218,12 +234,45 @@ test("repository persists cycles/settings, deduplicates Apple Health and preserv
   assert.equal(state.measurements[0].observations.Weight.length, 2);
   const closed = await repository.closeCycle(cycle.id);
   assert.equal(closed.status, "completed");
+  await repository.deleteCycle(cycle.id);
+  state = await repository.getState();
+  assert.equal(state.cycles.length, 0);
+  assert.equal(state.measurements.length, 0);
   assert.equal(makeExport(state).format, "health-tracker-backup");
   await repository.deleteAll();
   state = await repository.getState();
   assert.equal(state.cycles.length, 0);
   assert.equal(state.measurements.length, 0);
   assert.equal(state.settings.units, "metric");
+});
+
+test("remote repository bootstraps local state and synchronizes later changes", async () => {
+  const local = new LocalRepository(new FakeDatabase());
+  const server = { revision: 0, state: { cycles: [], measurements: [], settings: { units: "metric" } } };
+  const requests = [];
+  const fetcher = async (url, options) => {
+    requests.push({ url, options });
+    if (options.headers.Authorization !== "Bearer test-token") return { ok: false, status: 401, json: async () => ({ error: "auth" }) };
+    if (options.method === "PUT") {
+      if (Number(options.headers["If-Match"]) !== server.revision) return { ok: false, status: 409, json: async () => ({ error: "conflict" }) };
+      server.state = JSON.parse(options.body);
+      server.revision += 1;
+    }
+    return { ok: true, status: 200, json: async () => ({ ...server, pendingImport: null }) };
+  };
+  const repository = new RemoteRepository(local, { endpoint: "https://api.example", token: "test-token", fetcher });
+  await repository.connect();
+  const baseline = makeManualBaselineObservations({ Weight: "72" });
+  const { cycle, measurement } = createCycleRecord({ type: "deficit", startDate: "2026-01-01", baselineObservations: baseline });
+  await repository.createCycleWithBaseline(cycle, measurement);
+  assert.equal(server.state.cycles.length, 1);
+  assert.equal(server.state.measurements.length, 1);
+  assert.equal(server.revision, 2);
+  assert.equal(requests.every(item => item.options.headers.Authorization === "Bearer test-token"), true);
+  server.state.settings.units = "imperial";
+  server.revision += 1;
+  await repository.refresh();
+  assert.equal((await repository.getState()).settings.units, "imperial");
 });
 
 (async () => {
