@@ -6,12 +6,12 @@ export const SHORTCUT_DRAFT_TTL_MS = 10 * 60 * 1000;
 
 export function buildAppleHealthShortcutUrl(date) {
   if (!isValidDateOnly(date)) throw new Error("Selecciona una fecha válida antes de abrir Apple Health.");
-  const query = new URLSearchParams({
-    name: APPLE_HEALTH_SHORTCUT_NAME,
-    input: "text",
-    text: date
-  });
-  return `shortcuts://run-shortcut?${query.toString()}`;
+  const query = [
+    `name=${encodeURIComponent(APPLE_HEALTH_SHORTCUT_NAME)}`,
+    "input=text",
+    `text=${encodeURIComponent(date)}`
+  ].join("&");
+  return `shortcuts://run-shortcut?${query}`;
 }
 
 export function createShortcutDraft({ view, cycleId = null, measurementId = null, date, values, type = null, startDate = null, now = Date.now() }) {

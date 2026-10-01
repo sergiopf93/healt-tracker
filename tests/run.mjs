@@ -109,7 +109,9 @@ test("Apple Health parser rejects malformed, ambiguous, oversized, and implausib
 });
 
 test("Apple Health shortcut URL passes the selected date and draft imports only into empty fields", () => {
-  const url = new URL(buildAppleHealthShortcutUrl("2026-01-02"));
+  const shortcutUrl = buildAppleHealthShortcutUrl("2026-01-02");
+  assert.equal(shortcutUrl, "shortcuts://run-shortcut?name=health-care%20-%20Apple%20Health&input=text&text=2026-01-02");
+  const url = new URL(shortcutUrl);
   assert.equal(url.protocol, "shortcuts:");
   assert.equal(url.hostname, "run-shortcut");
   assert.equal(url.searchParams.get("name"), APPLE_HEALTH_SHORTCUT_NAME);
