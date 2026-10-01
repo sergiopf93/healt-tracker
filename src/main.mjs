@@ -331,7 +331,7 @@ function shortcutImportPreview(draft) {
 
 function shortcutButtonMarkup(draft = null) {
   const canImport = draft && !(draft.healthObservations || []).length;
-  return `<div class="shortcut-launch"><button class="button button-secondary" type="button" data-action="launch-health-shortcut">♡ Obtener valores de Apple Health</button>${canImport ? `<button class="button button-secondary" type="button" data-action="import-health-file">Importar archivo de Atajos</button><input id="shortcut-health-file" type="file" accept=".json,application/json" hidden>` : ""}<p>${canImport ? "Al volver a Health Tracker, selecciona el JSON que Atajos guardó en Archivos." : "Se abrirá Atajos; al terminar, vuelve aquí para revisar los datos."}</p></div>`;
+  return `<div class="shortcut-launch"><button class="button button-secondary" type="button" data-action="launch-health-shortcut">♡ Obtener valores de Apple Health</button>${canImport ? `<button class="button button-secondary" type="button" data-action="import-health-file">Importar archivo de Atajos</button><input id="shortcut-health-file" type="file" hidden>` : ""}<p>${canImport ? "Al volver a Health Tracker, selecciona el JSON que Atajos guardó en Archivos." : "Se abrirá Atajos; al terminar, vuelve aquí para revisar los datos."}</p></div>`;
 }
 
 function sourceHint(measurement, metricId) {
