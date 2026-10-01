@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Health Tracker · Callback Test</title>
+
+  <style>
+    body {
+      margin: 0;
+      padding: 24px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f5f5f5;
+      color: #222;
+    }
+
+    main {
+      max-width: 800px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      margin-bottom: 8px;
+    }
+
+    p {
+      color: #666;
+    }
+
+    pre {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 12px;
+      padding: 16px;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .ok {
+      color: #16803c;
+      font-weight: 600;
+    }
+
+    .empty {
+      color: #b45309;
+      font-weight: 600;
+    }
+  </style>
+</head>
+
+<body>
+  <main>
+    <h1>Health Tracker · Callback Test</h1>
+
+    <p id="status">Leyendo datos recibidos...</p>
+
+    <h2>URL completa</h2>
+    <pre id="url"></pre>
+
+    <h2>Parámetros recibidos</h2>
+    <pre id="params"></pre>
+  </main>
+
+  <script>
+    const status = document.getElementById("status");
+    const urlElement = document.getElementById("url");
+    const paramsElement = document.getElementById("params");
+
+    const currentUrl = window.location.href;
+    const params = new URLSearchParams(window.location.search);
+
+    urlElement.textContent = currentUrl;
+
+    const received = {};
+
+    for (const [key, value] of params.entries()) {
+      received[key] = value;
+    }
+
+    if (Object.keys(received).length === 0) {
+      status.textContent = "No se han recibido parámetros.";
+      status.className = "empty";
+      paramsElement.textContent = "(vacío)";
+    } else {
+      status.textContent = "✓ Se han recibido datos.";
+      status.className = "ok";
+
+      paramsElement.textContent = JSON.stringify(
+        received,
+        null,
+        2
+      );
+    }
+  </script>
+</body>
+</html>
