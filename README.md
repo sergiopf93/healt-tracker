@@ -21,7 +21,7 @@ La API es un Cloudflare Worker y el estado de la aplicación se guarda en una ba
 3. El **Deploy command** es `npx wrangler deploy --config ./wrangler.toml`. El `database_id` de `wrangler.toml` debe ser el de la base D1 y el nombre del Worker debe coincidir con `name` en ese archivo.
 4. En **Settings → Variables and Secrets**, crea el secreto `HEALTH_TRACKER_API_KEY` con una clave aleatoria larga. Guárdala en un gestor de contraseñas y no la añadas a archivos del proyecto.
 5. En Health Tracker → **Ajustes → Backend privado**, introduce la URL del Worker y el mismo token. El endpoint desplegado para este proyecto es `https://healt-tracker.sergio-pf93-794.workers.dev`. Hazlo antes de cambiar el Atajo para que la app copie primero los datos locales a D1.
-6. En el Atajo **health-care - Apple Health**, después de generar el JSON añade **Obtener contenido de URL** con método POST a la URL del Worker seguida de `/api/import`. Añade `Authorization: Bearer <token>` como cabecera y envía el objeto JSON generado como cuerpo (`Content-Type: application/json`). Conserva al final **Abrir app → Health Tracker**.
+6. En el Atajo **health-care - Apple Health**, después de generar el JSON añade **Obtener contenido de URL** con método POST a la URL del Worker seguida de `/api/import`. Añade `Authorization: Bearer <token>` como cabecera y un cuerpo JSON con `date` y `data`; `data` puede ser el diccionario de métricas o texto JSON válido. La acción de envío puede quedar al final.
 
 `APP_ORIGIN` en `wrangler.toml` debe coincidir con el origen HTTPS de GitHub Pages (solo dominio, sin la ruta `/healt-tracker/`). El token debe ser el mismo en Cloudflare, Ajustes y la cabecera del Atajo. Cada persona con ese token puede leer y modificar los datos, así que no lo compartas. Si se borran los datos del sitio, vuelve a introducirlo; los ciclos seguirán en D1.
 
@@ -35,7 +35,7 @@ Los tres gráficos comparan: peso, masa libre de grasa y porcentaje de grasa; TM
 
 ## Apple Health y Atajos
 
-La PWA no accede directamente a HealthKit. El botón abre el atajo existente **health-care - Apple Health** y le pasa la fecha seleccionada. Con el backend conectado, el Atajo envía el JSON a `/api/import`; al volver, la app recibe la importación en el formulario pendiente. Los valores manuales se conservan, los conflictos guardan sus dos orígenes y las importaciones repetidas se deduplican al guardar.
+La PWA no accede directamente a HealthKit. El botón abre el atajo existente **health-care - Apple Health** y le pasa la fecha seleccionada. Con el backend conectado, el Atajo envía el JSON a `/api/import`; al volver a la PWA desde el selector de apps, esta consulta Cloudflare automáticamente y espera la importación hasta 45 segundos. Los valores manuales se conservan, los conflictos guardan sus dos orígenes y las importaciones repetidas se deduplican al guardar.
 
 ## Comprobaciones
 

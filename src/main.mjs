@@ -19,6 +19,11 @@ const dateFormat = new Intl.DateTimeFormat("es-ES", { day: "numeric", month: "sh
 const state = { view: "summary", cycleId: null, measurementId: null, comparison: "start", toast: null, toastKind: "info", busy: false, pendingShortcutDraft: null, remoteConnected: false, chartFocus: {} };
 let repository;
 let snapshot = { cycles: [], measurements: [], settings: { units: "metric" } };
+let pendingImportPollTimer = null;
+let pendingImportWaitUntil = 0;
+let remoteRefreshPromise = null;
+const PENDING_IMPORT_WAIT_MS = 45_000;
+const PENDING_IMPORT_POLL_MS = 1_500;
 
 function escapeHtml(value) {
   return String(value == null ? "" : value).replace(/[&<>"']/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);
@@ -61,6 +66,8 @@ function typeLabel(type) {
 }
 
 function setToast(message, kind = "success") {
+  window.clearTimeout(render.toastTimer);
+  render.toastTimer = null;
   state.toast = message;
   state.toastKind = kind;
 }
@@ -467,7 +474,7 @@ function settingsView() {
   return `<div class="page-stack">
     <div class="page-title-row"><div><p class="eyebrow">PREFERENCIAS</p><h1>Ajustes</h1><p>Tu experiencia, a tu manera.</p></div></div>
     <section class="settings-card"><div class="settings-icon" aria-hidden="true">↔</div><div class="settings-copy"><h2>Unidades</h2><p>Elige cómo ver tus medidas. Tus datos guardados no cambian.</p><label class="settings-select"><span class="sr-only">Sistema de unidades</span><select id="units-setting"><option value="metric" ${snapshot.settings.units === "metric" ? "selected" : ""}>Métrico · kg, cm</option><option value="imperial" ${snapshot.settings.units === "imperial" ? "selected" : ""}>Anglosajón · lb, in</option></select></label></div></section>
-    <section class="settings-card"><div class="settings-icon health-icon" aria-hidden="true">♡</div><div class="settings-copy"><p class="eyebrow">PUENTE MANUAL</p><h2>Apple Health</h2><p>El atajo envía los valores directamente al backend privado. Al volver a la app, se cargan en el ciclo abierto.</p><div class="shortcut-name">health-care - Apple Health</div><ul class="settings-steps"><li>Configura la URL del backend y el token aquí.</li><li>En el Atajo, añade <b>Obtener contenido de URL</b> con método POST a <code>/api/import</code>, cabecera <code>Authorization: Bearer …</code> y el JSON como cuerpo.</li><li>Deja al final <b>Abrir app → Health Tracker</b>. La app sincroniza al volver al primer plano.</li></ul></div></section>
+    <section class="settings-card"><div class="settings-icon health-icon" aria-hidden="true">♡</div><div class="settings-copy"><p class="eyebrow">PUENTE MANUAL</p><h2>Apple Health</h2><p>El Atajo envía los valores a Cloudflare. Vuelve a Health Tracker desde el selector de apps; el formulario espera y recibe la respuesta automáticamente.</p><div class="shortcut-name">health-care - Apple Health</div><ul class="settings-steps"><li>Configura la URL del backend y el token aquí.</li><li>En el Atajo, usa <b>Obtener contenido de URL</b> con método POST a <code>/api/import</code>, cabecera <code>Authorization: Bearer …</code> y cuerpo JSON con <code>date</code> y <code>data</code>.</li><li>Deja esa acción al final del envío. Al volver a Health Tracker desde el selector de apps, la app espera la importación automáticamente.</li></ul></div></section>
     <section class="settings-card backend-card"><div class="settings-icon" aria-hidden="true">↗</div><div class="settings-copy"><h2>Backend privado</h2><p>El endpoint y token se guardan solo en este navegador. Configura el mismo token como secreto de Cloudflare y en la cabecera del Atajo.</p><form id="backend-config-form" class="backend-config-form"><label><span>URL del Worker</span><input name="endpoint" type="url" inputmode="url" placeholder="https://healt-tracker.…workers.dev" value="${escapeHtml(remote && remote.endpoint || "")}" required></label><label><span>Token de acceso</span><input name="token" type="password" autocomplete="new-password" placeholder="${remote ? "Configurado; déjalo vacío para conservarlo" : "Pega el token que configurarás en Cloudflare"}" ${remote ? "" : "required"}></label><button class="button button-primary" type="submit">${remote ? "Guardar conexión" : "Conectar backend"}</button><small>El nivel gratuito tiene cuotas. No se activa ningún plan de pago desde la aplicación.</small></form></div></section>
     <section class="settings-card"><div class="settings-icon" aria-hidden="true">↓</div><div class="settings-copy"><h2>Exportar tus datos</h2><p>Descarga una copia JSON con tus ciclos, observaciones y preferencias.</p><button class="button button-secondary" type="button" data-action="export">Descargar copia</button></div></section>
     <section class="settings-card danger-card"><div class="settings-icon" aria-hidden="true">⌫</div><div class="settings-copy"><h2>Eliminar todos los datos</h2><p>${state.remoteConnected ? "Borra todos los ciclos, mediciones y preferencias del backend y de este navegador. No se puede deshacer." : "Borra ciclos, mediciones y preferencias de este navegador. No se puede deshacer."}</p><button class="button button-danger" type="button" data-action="delete-all">Eliminar datos</button></div></section>
@@ -538,6 +545,7 @@ function saveStoredShortcutDraft(draft) {
 function clearStoredShortcutDraft() {
   try { localStorage.removeItem(SHORTCUT_DRAFT_STORAGE_KEY); } catch { /* local storage can be unavailable */ }
   state.pendingShortcutDraft = null;
+  stopPendingImportWait();
 }
 
 function restoreShortcutDraft() {
@@ -564,6 +572,7 @@ function launchAppleHealthFromForm(form) {
     startDate: createCycle ? String(formData.get("startDate") || "") : null
   });
   if (!saveStoredShortcutDraft(draft)) return;
+  stopPendingImportWait();
   render();
   window.location.href = buildAppleHealthShortcutUrl(date);
 }
@@ -921,23 +930,82 @@ async function boot() {
   }
 }
 
-async function refreshRemoteState() {
-  if (!state.remoteConnected || state.busy || typeof repository.refresh !== "function") return;
-  try {
-    await repository.refresh();
-    await reloadState();
-    const attached = await attachPendingBackendImport();
-    if (attached || ["summary", "cycles", "cycle-detail"].includes(state.view)) render();
-  } catch {
-    setToast("No se pudo actualizar desde el backend. Se mantienen los datos locales.", "warning");
+function currentShortcutDraft() {
+  return state.pendingShortcutDraft || readStoredShortcutDraft();
+}
+
+function stopPendingImportWait() {
+  if (pendingImportPollTimer !== null) window.clearTimeout(pendingImportPollTimer);
+  pendingImportPollTimer = null;
+  pendingImportWaitUntil = 0;
+}
+
+function schedulePendingImportPoll() {
+  const draft = currentShortcutDraft();
+  if (document.visibilityState === "hidden" || !isShortcutDraftFresh(draft) || pendingImportPollTimer !== null) return;
+  if (!pendingImportWaitUntil) pendingImportWaitUntil = Date.now() + PENDING_IMPORT_WAIT_MS;
+  if (Date.now() >= pendingImportWaitUntil) {
+    stopPendingImportWait();
+    setToast("Todavía no llegaron los valores. Comprueba que el Atajo terminó el envío y vuelve a intentarlo.", "error");
     updateToastInPlace();
+    return;
+  }
+  setToast("Esperando los valores de Apple Health desde Cloudflare…");
+  updateToastInPlace();
+  pendingImportPollTimer = window.setTimeout(() => {
+    pendingImportPollTimer = null;
+    refreshRemoteState();
+  }, PENDING_IMPORT_POLL_MS);
+}
+
+async function refreshRemoteState() {
+  if (!state.remoteConnected || state.busy || typeof repository.refresh !== "function" || document.visibilityState === "hidden") return;
+  if (remoteRefreshPromise) return remoteRefreshPromise;
+  remoteRefreshPromise = (async () => {
+    try {
+      await repository.refresh();
+      await reloadState();
+      const attached = await attachPendingBackendImport();
+      if (attached) {
+        stopPendingImportWait();
+        render();
+        return;
+      }
+      if (repository.pendingImport) {
+        stopPendingImportWait();
+        updateToastInPlace();
+        return;
+      }
+      if (isShortcutDraftFresh(currentShortcutDraft())) {
+        schedulePendingImportPoll();
+        return;
+      }
+      stopPendingImportWait();
+      if (["summary", "cycles", "cycle-detail"].includes(state.view)) render();
+    } catch {
+      if (isShortcutDraftFresh(currentShortcutDraft())) {
+        setToast("Esperando la conexión con Cloudflare…", "warning");
+        updateToastInPlace();
+        schedulePendingImportPoll();
+      } else {
+        setToast("No se pudo actualizar desde el backend. Se mantienen los datos locales.", "warning");
+        updateToastInPlace();
+      }
+    }
+  })();
+  try {
+    await remoteRefreshPromise;
+  } finally {
+    remoteRefreshPromise = null;
   }
 }
 
 async function attachPendingBackendImport() {
   const imported = repository && repository.pendingImport;
   if (!imported) return false;
-  const draft = state.pendingShortcutDraft || readStoredShortcutDraft();
+  let draft = currentShortcutDraft();
+  const form = app.querySelector("#create-cycle-form, #measurement-form");
+  if (draft && form) draft = updateDraftFromCurrentForm(form, { ...draft, values: { ...draft.values } });
   if (!draft || draft.requestedDate !== imported.date || !isShortcutDraftFresh(draft)) {
     setToast(`Hay una importación pendiente para ${displayDate(imported.date)}. Abre el formulario de esa medición para recibirla.`, "warning");
     return false;

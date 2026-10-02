@@ -63,11 +63,18 @@ export function parseHealthData(rawPayload) {
   const payload = unwrapPayload(rawPayload);
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("El contenido de healthData debe ser un objeto JSON.");
   if (!isValidDateOnly(payload.date)) throw new Error("La fecha de Apple Health no tiene el formato YYYY-MM-DD.");
-  if (!payload.data || typeof payload.data !== "object" || Array.isArray(payload.data)) throw new Error("Falta el objeto data de Apple Health.");
+  let data = payload.data;
+  if (typeof data === "string") {
+    try { data = JSON.parse(decodeCandidate(data)); }
+    catch { throw new Error("El campo data debe contener un objeto JSON válido."); }
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("Falta el objeto data de Apple Health. Envía data como diccionario o como texto JSON válido.");
+  }
 
   const observations = [];
   const ignored = [];
-  for (const [metricId, item] of Object.entries(payload.data)) {
+  for (const [metricId, item] of Object.entries(data)) {
     if (!HEALTH_KEYS.includes(metricId)) {
       ignored.push(metricId);
       continue;
