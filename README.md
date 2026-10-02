@@ -16,13 +16,12 @@ Abre `http://localhost:4173`. Para instalarla en iPhone, publica el sitio en HTT
 
 La API es un Cloudflare Worker y el estado de la aplicación se guarda en una base D1. El Worker protege cada llamada con un token aleatorio; no se guarda en Git ni se incluye en el código servido por Pages. La app y el Atajo lo conservan localmente/configurado por separado. El nivel gratuito tiene límites diarios; al agotarlos las peticiones dejan de funcionar hasta que se restablezca la cuota. No se necesita activar Workers Paid.
 
-1. Crea una cuenta Cloudflare en el nivel gratuito e inicia sesión desde `npx wrangler login`.
-2. Desde la raíz del proyecto, ejecuta `npx wrangler d1 create health-tracker --jurisdiction eu --update-config`. Wrangler completará el identificador D1 en `wrangler.toml`.
-3. Inicializa el esquema: `npx wrangler d1 migrations apply health-tracker --remote`.
-4. Publica una primera vez: `npx wrangler deploy`.
-5. Crea un token aleatorio con `openssl rand -hex 32` y guárdalo en un gestor de contraseñas. Configúralo con `npx wrangler secret put HEALTH_TRACKER_API_KEY` y vuelve a ejecutar `npx wrangler deploy`. No lo añadas a archivos del proyecto.
-6. Abre Health Tracker → Ajustes → Backend privado. Introduce la URL `https://health-tracker-private-api.<tu-subdominio>.workers.dev` que muestra Wrangler y el token. Hazlo antes de modificar el Atajo para que la app copie primero los datos locales a D1.
-7. En el Atajo **health-care - Apple Health**, después de generar el JSON añade **Obtener contenido de URL** con método POST a la URL del Worker seguida de `/api/import`. Añade `Authorization: Bearer <token>` como cabecera y envía el objeto JSON generado como cuerpo (`Content-Type: application/json`). Conserva al final **Abrir app → Health Tracker**.
+1. Crea una base D1 llamada `health-tracker` y selecciona jurisdicción **EU**. En su pestaña **Console**, ejecuta el esquema de `backend/migrations/0001_health_state.sql`.
+2. Conecta el repositorio a **Workers Builds** desde el panel de Cloudflare. Usa como raíz el directorio del repositorio, deja vacío **Build command** y despliega desde la rama estable que contiene la aplicación.
+3. El **Deploy command** es `npx wrangler deploy --config ./wrangler.toml`. El `database_id` de `wrangler.toml` debe ser el de la base D1 y el nombre del Worker debe coincidir con `name` en ese archivo.
+4. En **Settings → Variables and Secrets**, crea el secreto `HEALTH_TRACKER_API_KEY` con una clave aleatoria larga. Guárdala en un gestor de contraseñas y no la añadas a archivos del proyecto.
+5. En Health Tracker → **Ajustes → Backend privado**, introduce la URL del Worker y el mismo token. El endpoint desplegado para este proyecto es `https://healt-tracker.sergio-pf93-794.workers.dev`. Hazlo antes de cambiar el Atajo para que la app copie primero los datos locales a D1.
+6. En el Atajo **health-care - Apple Health**, después de generar el JSON añade **Obtener contenido de URL** con método POST a la URL del Worker seguida de `/api/import`. Añade `Authorization: Bearer <token>` como cabecera y envía el objeto JSON generado como cuerpo (`Content-Type: application/json`). Conserva al final **Abrir app → Health Tracker**.
 
 `APP_ORIGIN` en `wrangler.toml` debe coincidir con el origen HTTPS de GitHub Pages (solo dominio, sin la ruta `/healt-tracker/`). El token debe ser el mismo en Cloudflare, Ajustes y la cabecera del Atajo. Cada persona con ese token puede leer y modificar los datos, así que no lo compartas. Si se borran los datos del sitio, vuelve a introducirlo; los ciclos seguirán en D1.
 
