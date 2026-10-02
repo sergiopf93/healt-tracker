@@ -275,6 +275,24 @@ test("remote repository bootstraps local state and synchronizes later changes", 
   assert.equal((await repository.getState()).settings.units, "imperial");
 });
 
+test("remote repository calls the browser fetch with its required global context", async () => {
+  const originalFetch = globalThis.fetch;
+  let called = false;
+  globalThis.fetch = function (url, options) {
+    assert.equal(this, globalThis);
+    called = true;
+    return Promise.resolve({ ok: true, json: async () => ({ url, method: options.method || "GET" }) });
+  };
+  try {
+    const repository = new RemoteRepository({}, { endpoint: "https://api.example", token: "test-token" });
+    const result = await repository.request("/api/state");
+    assert.equal(called, true);
+    assert.equal(result.url, "https://api.example/api/state");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 (async () => {
   let failed = 0;
   for (const [name, fn] of tests) {

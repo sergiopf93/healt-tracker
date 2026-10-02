@@ -11,7 +11,7 @@ export function readRemoteConfig(storage = globalThis.localStorage) {
 }
 
 export class RemoteRepository {
-  constructor(localRepository, { endpoint, token, fetcher = globalThis.fetch }) {
+  constructor(localRepository, { endpoint, token, fetcher = (...args) => globalThis.fetch(...args) }) {
     this.local = localRepository;
     this.endpoint = endpoint.replace(/\/$/, "");
     this.token = token;
