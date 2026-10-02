@@ -1,4 +1,4 @@
-name = "health-tracker-private-api"
+name = "healt-tracker"
 main = "backend/worker.mjs"
 compatibility_date = "2026-10-01"
 
