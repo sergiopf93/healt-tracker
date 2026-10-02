@@ -857,7 +857,7 @@ app.addEventListener("submit", async event => {
     try {
       const parsed = new URL(endpoint);
       if (parsed.protocol !== "https:" && parsed.hostname !== "localhost") throw new Error("La URL del backend debe usar HTTPS.");
-      if (!token || token.length < 32) throw new Error("El token debe tener al menos 32 caracteres aleatorios.");
+      if (!token) throw new Error("Introduce el token configurado en Cloudflare.");
       localStorage.setItem(REMOTE_CONFIG_KEY, JSON.stringify({ endpoint, token }));
       window.location.reload();
     } catch (error) {
