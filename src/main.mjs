@@ -16,7 +16,7 @@ import {
 const app = document.querySelector("#app");
 const numberFormat = new Intl.NumberFormat("es-ES", { maximumFractionDigits: 1 });
 const dateFormat = new Intl.DateTimeFormat("es-ES", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
-const state = { view: "summary", cycleId: null, measurementId: null, comparison: "start", toast: null, toastKind: "info", busy: false, pendingShortcutDraft: null, remoteConnected: false, chartFocus: {} };
+const state = { view: "summary", cycleId: null, measurementId: null, comparison: "start", toast: null, toastKind: "info", busy: false, pendingShortcutDraft: null, remoteConnected: false, chartFocus: {}, chartScroll: {} };
 let repository;
 let snapshot = { cycles: [], measurements: [], settings: { units: "metric" } };
 let pendingImportPollTimer = null;
@@ -89,9 +89,9 @@ function updateToastInPlace() {
 
 function shell(content) {
   const tabs = [
-    ["summary", "Resumen", "◌"],
-    ["cycles", "Ciclos", "◷"],
-    ["settings", "Ajustes", "⚙"]
+    ["summary", "Resumen", '<svg viewBox="0 0 24 24"><path d="M3.5 12a8.5 8.5 0 1 0 8.5-8.5"/><path d="M3.5 5.5v6.5H10"/><path d="M12 7v5l3.5 2"/></svg>'],
+    ["cycles", "Ciclos", '<svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="3"/><path d="M8 3.5v3M16 3.5v3M4 9.5h16M8 13h3M8 16h6"/></svg>'],
+    ["settings", "Ajustes", '<svg viewBox="0 0 24 24"><path d="M12 3.5 14 5l2.5-.2 1 2.3 2.1 1.4-.5 2.5.8 2.4-1.8 1.8-.4 2.5-2.4.8-1.5 2-2.5-.8-2.4.8-1.5-2-2.4-.8-.4-2.5-1.8-1.8.8-2.4-.5-2.5 2.1-1.4 1-2.3L10 5z"/><circle cx="12" cy="12" r="3"/></svg>']
   ];
   return `
     <div class="app-frame">
@@ -161,82 +161,82 @@ function readingSummary(measurement) {
     const conflict = isObservationConflict(observationValues(measurement, id));
     if (conflict) return `<div class="reading-row"><span>${escapeHtml(metric.label)}</span><strong class="value-muted">Hay valores distintos</strong></div>`;
     if (!observation) return "";
-    const estimate = observation.quality === "estimated" ? `<span class="mini-tag">estimación</span>` : "";
-    return `<div class="reading-row"><span>${escapeHtml(metric.label)} ${estimate}</span><strong>${valueWithUnit(id, observation.value)}</strong></div>`;
+    return `<div class="reading-row"><span>${escapeHtml(metric.label)}</span><strong>${valueWithUnit(id, observation.value)}</strong></div>`;
   }).filter(Boolean).join("");
   const derived = deriveMetrics(measurement);
   const derivedRows = [
     ["Masa grasa calculada", derived.fatMass],
     ["Masa libre de grasa", derived.fatFreeMass]
-  ].filter(([, item]) => item).map(([label, item]) => `<div class="reading-row"><span>${escapeHtml(label)} <span class="mini-tag">estimación</span></span><strong>${valueWithUnit("Weight", item.value)}</strong></div>`).join("");
+  ].filter(([, item]) => item).map(([label, item]) => `<div class="reading-row"><span>${escapeHtml(label)}</span><strong>${valueWithUnit("Weight", item.value)}</strong></div>`).join("");
   return `<div class="reading-list">${rows || `<p class="value-muted">Esta medición no contiene valores disponibles.</p>`}${derivedRows}</div>`;
 }
 
 function chartFor(cycle, metricIds, title, subtitle) {
   const measurements = allCycleMeasurements(cycle.id);
   const colors = ["#c87557", "#5f8271", "#7886a0", "#d0a85e"];
-  const left = 42, right = 292, top = 18, bottom = 132;
-  const horizon = Math.max(16, cycleWeek(cycle.startDate, cycle.closedAt || todayLocalDate()));
+  const left = 42, top = 18, bottom = 132, weekWidth = 58;
+  const plotWidth = 16 * weekWidth;
+  const right = left + plotWidth;
+  const axisRight = right + Math.max(0, metricIds.length - 1) * 48 + 8;
+  const svgWidth = axisRight + 8;
   const series = metricIds.map((metricId, seriesIndex) => {
-    let values;
-    if (metricId === "Steps") {
-      values = averageMetricByCycleWeek(measurements, metricId, cycle.startDate).map(point => ({
-        metricId, week: point.week, value: point.value, count: point.count,
-        xRatio: Math.max(0, Math.min(1, (point.week - 0.5) / horizon))
-      }));
-    } else {
-      values = measurements.flatMap(measurement => {
+    const values = metricId === "Steps"
+      ? averageMetricByCycleWeek(measurements, metricId, cycle.startDate).map(point => ({ metricId, week: point.week, value: point.value, count: point.count, dayOffset: (point.week - 0.5) * 7 }))
+      : measurements.flatMap(measurement => {
         const observation = effectiveObservation(measurement, metricId);
-        return observation ? [{ metricId, measurement, value: observation.value, week: cycleWeek(cycle.startDate, measurement.date) }] : [];
-      }).sort((a, b) => a.week - b.week || a.measurement.date.localeCompare(b.measurement.date));
-    }
-    const side = ["Body Fat Percentage", "Steps"].includes(metricId) ? "right" : "left";
+        return observation ? [{ metricId, measurement, value: observation.value, week: cycleWeek(cycle.startDate, measurement.date), dayOffset: daysBetween(cycle.startDate, measurement.date) }] : [];
+      }).sort((a, b) => a.dayOffset - b.dayOffset);
     const coords = values.map(point => ({
       ...point,
       shown: fromCanonical(metricId, point.value, snapshot.settings.units),
-      x: left + (point.xRatio == null ? Math.max(0, Math.min(1, daysBetween(cycle.startDate, point.measurement.date) / Math.max(1, horizon * 7 - 1))) : point.xRatio) * (right - left)
+      x: left + Math.max(0, Math.min(1, point.dayOffset / (16 * 7 - 1))) * (plotWidth - weekWidth / 2)
     }));
-    return { metricId, color: colors[seriesIndex % colors.length], coords, points: values.length, side };
+    const shown = coords.map(point => point.shown);
+    const minimum = shown.length ? Math.min(...shown) : 0;
+    const maximum = shown.length ? Math.max(...shown) : 1;
+    const padding = maximum === minimum ? Math.max(Math.abs(maximum) * 0.04, 0.5) : (maximum - minimum) * 0.18;
+    const domain = [minimum - padding, maximum + padding];
+    for (const point of coords) point.y = bottom - ((point.shown - domain[0]) / (domain[1] - domain[0])) * (bottom - top);
+    return { metricId, color: colors[seriesIndex % colors.length], coords, points: values.length, domain };
   });
+  const dimensions = new Set(metricIds.map(metricId => metricById(metricId)?.dimension));
+  const sharedScale = dimensions.size === 1;
+  if (sharedScale) {
+    const shown = series.flatMap(item => item.coords.map(point => point.shown));
+    const minimum = shown.length ? Math.min(...shown) : 0;
+    const maximum = shown.length ? Math.max(...shown) : 1;
+    const padding = maximum === minimum ? Math.max(Math.abs(maximum) * 0.04, 0.5) : (maximum - minimum) * 0.18;
+    const domain = [minimum - padding, maximum + padding];
+    for (const item of series) {
+      item.domain = domain;
+      for (const point of item.coords) point.y = bottom - ((point.shown - domain[0]) / (domain[1] - domain[0])) * (bottom - top);
+    }
+  }
   const points = series.reduce((sum, item) => sum + item.points, 0);
   const chartId = `${cycle.id}-${metricIds.join("-")}`;
   const selected = state.chartFocus[chartId] || [];
   const focusActive = selected.length > 0;
-  const palette = Object.fromEntries(series.map(item => [item.metricId, item.color]));
   const legend = series.map(item => {
     const pressed = focusActive ? selected.includes(item.metricId) : true;
-    return `<button class="legend-item ${pressed ? "" : "is-dimmed"}" type="button" data-action="focus-series" data-chart-id="${escapeHtml(chartId)}" data-series-id="${escapeHtml(item.metricId)}" aria-pressed="${pressed}"><i style="--series-color:${item.color}"></i>${escapeHtml(metricById(item.metricId).label)}${metricById(item.metricId).estimate ? " · estimación" : ""}</button>`;
+    return `<button class="legend-item ${pressed ? "" : "is-dimmed"}" type="button" data-action="focus-series" data-chart-id="${escapeHtml(chartId)}" data-series-id="${escapeHtml(item.metricId)}" aria-pressed="${pressed}"><i style="--series-color:${item.color}"></i>${escapeHtml(metricById(item.metricId).label)}</button>`;
   }).join("");
-  const visibleSeries = series;
-  const valuesForSide = side => visibleSeries.filter(item => item.side === side).flatMap(item => item.coords.map(point => point.shown));
-  const domainFor = side => {
-    const values = valuesForSide(side);
-    const min = values.length ? Math.min(...values) : 0;
-    const max = values.length ? Math.max(...values) : 1;
-    const padding = max === min ? Math.max(Math.abs(max) * 0.12, 1) : (max - min) * 0.12;
-    return [min - padding, max + padding];
-  };
-  const leftDomain = domainFor("left");
-  const rightDomain = domainFor("right");
-  const leftMetricSeries = visibleSeries.find(item => item.side === "left");
-  const rightMetricSeries = visibleSeries.find(item => item.side === "right");
-  const leftMetricId = leftMetricSeries ? leftMetricSeries.metricId : metricIds[0];
-  const rightMetricId = rightMetricSeries ? rightMetricSeries.metricId : null;
-  for (const item of series) {
-    const [minimum, maximum] = item.side === "left" ? leftDomain : rightDomain;
-    for (const point of item.coords) point.y = bottom - ((point.shown - minimum) / (maximum - minimum)) * (bottom - top);
-  }
-  const ticks = [0, 0.5, 1].map(fraction => {
+  const grid = [0, 0.5, 1].map(fraction => {
     const y = bottom - fraction * (bottom - top);
-    const leftValue = leftDomain[0] + fraction * (leftDomain[1] - leftDomain[0]);
-    const rightValue = rightDomain[0] + fraction * (rightDomain[1] - rightDomain[0]);
-    return `<g><line x1="${left}" y1="${y}" x2="${right}" y2="${y}" stroke="#e8e7e0" stroke-dasharray="3 5"/><text x="${left - 5}" y="${y + 3}" text-anchor="end" fill="#888980" font-size="8">${numberFormat.format(leftValue)}</text>${rightMetricId ? `<text x="${right + 5}" y="${y + 3}" text-anchor="start" fill="#888980" font-size="8">${numberFormat.format(rightValue)}</text>` : ""}</g>`;
+    return `<line x1="${left}" y1="${y}" x2="${right}" y2="${y}" stroke="#e8e7e0" stroke-dasharray="3 5"/>`;
   }).join("");
-  const xTicks = [1, 4, 8, 12, 16].filter(week => week <= horizon).map(week => {
-    const x = left + ((week - 1) / Math.max(1, horizon - 1)) * (right - left);
+  const axisSeries = sharedScale ? series.slice(0, 1) : series;
+  const axes = axisSeries.map((item, index) => {
+    const x = index === 0 ? left - 5 : right + 5 + (index - 1) * 48;
+    const anchor = index === 0 ? "end" : "start";
+    const values = [1, 0.5, 0].map(fraction => numberFormat.format(item.domain[0] + fraction * (item.domain[1] - item.domain[0])));
+    return `<g fill="${item.color}" font-size="8"><text x="${x}" y="${top + 3}" text-anchor="${anchor}">${values[0]}</text><text x="${x}" y="${(top + bottom) / 2 + 3}" text-anchor="${anchor}">${values[1]}</text><text x="${x}" y="${bottom + 3}" text-anchor="${anchor}">${values[2]}</text></g>`;
+  }).join("");
+  const xTicks = Array.from({ length: 16 }, (_, index) => {
+    const week = index + 1;
+    const x = left + index * weekWidth + weekWidth / 2;
     return `<text x="${x}" y="${bottom + 14}" text-anchor="middle" fill="#888980" font-size="9">S${week}</text>`;
   }).join("");
-  const plotted = visibleSeries.map(item => {
+  const plotted = series.map(item => {
     const segments = [];
     let segment = [];
     for (const point of item.coords) {
@@ -244,17 +244,24 @@ function chartFor(cycle, metricIds, title, subtitle) {
       segment.push(point);
     }
     if (segment.length) segments.push(segment);
-    const paths = segments.filter(group => group.length > 1).map(group => `<path d="${group.map((point, index) => `${index ? "L" : "M"}${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(" ")}" fill="none" stroke="${palette[item.metricId]}" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"/>`).join("");
+    const paths = segments.filter(group => group.length > 1).map(group => `<path d="${group.map((point, index) => `${index ? "L" : "M"}${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(" ")}" fill="none" stroke="${item.color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`).join("");
     const dots = item.coords.map(point => {
       const when = point.measurement ? displayDate(point.measurement.date) : `Semana ${point.week}`;
-      return `<circle cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="4.2" fill="#fff" stroke="${palette[item.metricId]}" stroke-width="2.5"><title>${escapeHtml(metricById(item.metricId).label)} · ${escapeHtml(when)}: ${escapeHtml(valueWithUnit(item.metricId, point.value))}${item.metricId === "Steps" ? ` · media de ${point.count} ${point.count === 1 ? "día" : "días"}` : ""}</title></circle>`;
+      return `<circle cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="2.6" fill="#fff" stroke="${item.color}" stroke-width="1.7"><title>${escapeHtml(metricById(item.metricId).label)} · ${escapeHtml(when)}: ${escapeHtml(valueWithUnit(item.metricId, point.value))}${item.metricId === "Steps" ? ` · media de ${point.count} ${point.count === 1 ? "día" : "días"}` : ""}</title></circle>`;
     }).join("");
     return `<g class="chart-series-markup" opacity="${focusActive && !selected.includes(item.metricId) ? "0.12" : "1"}">${paths}${dots}</g>`;
   }).join("");
   const list = series.flatMap(item => item.coords.map(point => `<li><span>${escapeHtml(metricById(item.metricId).label)} · semana ${point.week}${point.measurement ? ` · ${escapeHtml(displayDate(point.measurement.date))}` : point.metricId === "Steps" ? ` · media de ${point.count} días` : ""}</span><strong>${escapeHtml(valueWithUnit(item.metricId, point.value))}</strong></li>`)).join("");
+  const focusDate = cycle.status === "active" ? todayLocalDate() : cycle.closedAt || measurements[measurements.length - 1]?.date || cycle.startDate;
+  const weekNow = Math.min(16, Math.max(1, cycleWeek(cycle.startDate, focusDate)));
+  const unitLabels = axisSeries.map((item, index) => {
+    const x = index === 0 ? left : right + 5 + (index - 1) * 48;
+    const anchor = index === 0 ? "start" : "start";
+    return `<text x="${x}" y="10" fill="${item.color}" font-size="8" text-anchor="${anchor}">${escapeHtml(displayUnit(item.metricId, snapshot.settings.units))}</text>`;
+  }).join("");
   return `<section class="chart-card">
-    <div class="section-heading"><div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(subtitle)}</p></div><span class="chart-count">${points} ${points === 1 ? "dato" : "datos"}</span></div>
-    ${points ? `<div class="chart-wrap"><svg viewBox="0 0 330 158" role="img" aria-label="${escapeHtml(title)} durante el ciclo. Las series comparten el tiempo y usan las escalas indicadas a los lados."><title>${escapeHtml(title)}</title>${ticks}${xTicks}${plotted}<text x="${left}" y="10" fill="#788078" font-size="8">${escapeHtml(displayUnit(leftMetricId, snapshot.settings.units))}</text>${rightMetricId ? `<text x="${right}" y="10" text-anchor="end" fill="#788078" font-size="8">${escapeHtml(displayUnit(rightMetricId, snapshot.settings.units))}</text>` : ""}<text x="${(left + right) / 2}" y="154" text-anchor="middle" fill="#888980" font-size="9">Semana del ciclo</text></svg></div><div class="chart-legend">${legend}</div><details class="chart-data"><summary>Ver mediciones y fechas</summary><ul>${list}</ul></details>` : `<div class="chart-empty"><span aria-hidden="true">⌁</span><p>La evolución aparecerá cuando haya mediciones.</p></div>`}
+    <div class="section-heading"><div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(subtitle)} · ${sharedScale ? "escala vertical compartida" : "escalas verticales independientes por serie"}</p></div><span class="chart-count">${points} ${points === 1 ? "dato" : "datos"}</span></div>
+    ${points ? `<div class="chart-wrap" data-chart-id="${escapeHtml(chartId)}" data-current-week="${weekNow}"><svg width="${svgWidth}" height="158" viewBox="0 0 ${svgWidth} 158" role="img" aria-label="${escapeHtml(title)} durante las 16 semanas, con ${sharedScale ? "escala compartida" : "escalas independientes por serie"}."><title>${escapeHtml(title)}</title>${grid}${axes}${xTicks}${plotted}${unitLabels}<text x="${(left + right) / 2}" y="154" text-anchor="middle" fill="#888980" font-size="9">Semana del ciclo</text></svg></div><div class="chart-legend">${legend}</div><details class="chart-data"><summary>Ver mediciones y fechas</summary><ul>${list}</ul></details>` : `<div class="chart-empty"><span aria-hidden="true">⌁</span><p>La evolución aparecerá cuando haya mediciones.</p></div>`}
   </section>`;
 }
 
@@ -271,13 +278,13 @@ function summaryView() {
   const daysFromStart = daysBetween(cycle.startDate, todayLocalDate());
   const compareLabel = state.comparison === "start" ? "Inicio del ciclo" : `${state.comparison} ${Number(state.comparison) === 1 ? "semana" : "semanas"} antes`;
   return `<div class="page-stack">
-    <section class="cycle-hero">
+    <section class="cycle-hero cycle-hero-link" data-action="open-cycle" data-cycle-id="${escapeHtml(cycle.id)}" role="button" tabindex="0" aria-label="Abrir los detalles del ciclo activo">
       <div class="cycle-hero-top"><span class="status-pill"><i></i> Ciclo activo</span><span class="cycle-type">${escapeHtml(type)}</span></div>
       <h1>Semana <span>${Math.min(cycle.plannedWeeks, Math.max(1, week))}</span><small> / ${cycle.plannedWeeks}</small></h1>
       <p>Desde ${escapeHtml(displayDate(cycle.startDate))} <span class="dot-separator">·</span> día ${Math.max(0, daysFromStart) + 1}</p>
       <div class="cycle-progress" role="progressbar" aria-label="Progreso del ciclo" aria-valuemin="0" aria-valuemax="16" aria-valuenow="${Math.min(16, Math.max(0, week))}"><span class="progress-${Math.min(16, Math.max(0, week))}"></span></div>
-      ${weekSixteen ? `<div class="week-alert"><span aria-hidden="true">✳</span><span>${beyondCycle ? "El período de 16 semanas ha terminado. Cierra este ciclo para empezar otro." : "Has llegado a la semana 16. Cierra este ciclo al terminar esta semana."}</span><button type="button" data-action="close-cycle" data-cycle-id="${escapeHtml(cycle.id)}">Cerrar</button></div>` : ""}
     </section>
+    ${weekSixteen ? `<div class="week-alert"><span aria-hidden="true">✳</span><span>${beyondCycle ? "El período de 16 semanas ha terminado. Cierra este ciclo para empezar otro." : "Has llegado a la semana 16. Cierra este ciclo al terminar esta semana."}</span><button type="button" data-action="close-cycle" data-cycle-id="${escapeHtml(cycle.id)}">Cerrar</button></div>` : ""}
     <div class="action-line"><div><p class="eyebrow">TU SEGUIMIENTO</p><h2>Un registro cada vez.</h2></div><button class="button button-primary" type="button" data-action="new-measurement" data-cycle-id="${escapeHtml(cycle.id)}" ${beyondCycle ? "disabled" : ""}><span aria-hidden="true">＋</span> Registrar</button></div>
     <section class="latest-panel">
       <div class="panel-heading"><div><p class="eyebrow">MEDICIÓN MÁS RECIENTE</p><h2>${latest ? escapeHtml(displayDate(latest.date)) : "Todavía no hay mediciones"}</h2></div>${latest ? `<button class="text-button" type="button" data-action="edit-measurement" data-measurement-id="${escapeHtml(latest.id)}">Editar</button>` : ""}</div>
@@ -291,7 +298,6 @@ function summaryView() {
     ${chartFor(cycle, ["Weight", "Lean Body Mass", "Body Fat Percentage"], "Peso y composición corporal", "Peso y masa libre de grasa en kg · grasa corporal en %")}
     ${chartFor(cycle, ["Resting Calories", "Steps"], "TMB y pasos", "TMB por registro · media de los días con dato por semana del ciclo")}
     ${chartFor(cycle, ["Waist", "Hips", "Flotadores"], "Medidas corporales", "Cintura, cadera y flotadores en la unidad elegida")}
-    <p class="quiet-note">Las cifras de composición corporal de básculas domésticas son estimaciones. Observa tendencias en condiciones de medición similares.</p>
   </div>`;
 }
 
@@ -302,12 +308,12 @@ function cycleCard(cycle) {
   const summaryMetric = first && last && effectiveObservation(first, "Weight") && effectiveObservation(last, "Weight");
   const weightDelta = summaryMetric ? difference(effectiveObservation(last, "Weight").value, effectiveObservation(first, "Weight").value) : null;
   const week = cycleWeek(cycle.startDate, cycle.closedAt || todayLocalDate());
-  return `<button class="history-card ${cycle.status === "active" ? "history-active" : ""}" type="button" data-action="open-cycle" data-cycle-id="${escapeHtml(cycle.id)}">
+  return `<div class="history-item"><button class="history-card ${cycle.status === "active" ? "history-active" : ""}" type="button" data-action="open-cycle" data-cycle-id="${escapeHtml(cycle.id)}">
     <span class="history-mark" aria-hidden="true">${cycle.status === "active" ? "◉" : "◷"}</span>
     <span class="history-main"><span class="history-title">${escapeHtml(typeLabel(cycle.type))} <i class="${cycle.status === "active" ? "status-pill-inline" : ""}">${cycle.status === "active" ? "Activo" : "Cerrado"}</i></span><span class="history-date">${escapeHtml(displayDate(cycle.startDate))}${cycle.closedAt ? ` — ${escapeHtml(displayDate(cycle.closedAt))}` : " — en curso"}</span><span class="history-meta">${measurements.length} ${measurements.length === 1 ? "medición" : "mediciones"} · semana ${week}</span></span>
     <span class="history-change">${weightDelta === null ? "—" : `${weightDelta > 0 ? "+" : "−"}${numberFormat.format(Math.abs(fromCanonical("Weight", weightDelta, snapshot.settings.units)))} ${displayUnit("Weight", snapshot.settings.units)}`}<small>${summaryMetric ? "cambio de peso" : "sin resumen"}</small></span>
     <span class="history-arrow" aria-hidden="true">↗</span>
-  </button>`;
+  </button>${cycle.status === "completed" ? `<details class="item-menu"><summary aria-label="Más opciones del ciclo">•••</summary><div><button class="danger-menu-item" type="button" data-action="delete-cycle" data-cycle-id="${escapeHtml(cycle.id)}">Eliminar ciclo</button></div></details>` : ""}</div>`;
 }
 
 function cyclesView() {
@@ -351,7 +357,8 @@ function measurementFields(measurement = null, draft = null) {
   const groups = [
     { title: "Composición corporal", description: "Puedes dejar cualquier campo vacío.", metrics: ["Weight", "Body Fat Percentage", "Lean Body Mass"] },
     { title: "Medidas", description: "Mide siempre en el mismo punto para comparar tendencias.", metrics: ["Waist", "Hips", "Flotadores"] },
-    { title: "Metabolismo", description: "La energía en reposo y el IMC pueden ser estimaciones de la báscula.", metrics: ["Resting Calories", "Body Mass Index"] }
+    { title: "Actividad", description: "Media de pasos diarios de los siete días hasta la fecha del registro.", metrics: ["Steps"] },
+    { title: "Metabolismo", description: "Añade la energía en reposo y el IMC si están disponibles.", metrics: ["Resting Calories", "Body Mass Index"] }
   ];
   return groups.map((group, groupIndex) => `<fieldset class="measurement-group"><legend>${escapeHtml(group.title)}</legend><p class="group-hint">${escapeHtml(group.description)}</p><div class="field-grid">${group.metrics.map(id => {
     const metric = metricById(id);
@@ -361,7 +368,7 @@ function measurementFields(measurement = null, draft = null) {
     if (incoming) {
       if (draftHasConflict(draft, id)) hint = `Manual y Apple Health difieren · ${escapeHtml(incoming.sourceName || "Atajo")}: ${escapeHtml(valueWithUnit(id, incoming.value))}`;
       else if (hasDraftManualValue(draft, id)) hint = `Manual + Apple Health · ${escapeHtml(incoming.sourceName || "Atajo")}`;
-      else hint = `Apple Health · ${escapeHtml(incoming.sourceName || "Atajo")}${incoming.quality === "estimated" ? " · estimación" : ""}`;
+      else hint = `Apple Health · ${escapeHtml(incoming.sourceName || "Atajo")}`;
     } else if (!measurement && draft && String(draft.values[id] || "").trim()) hint = "Registro manual";
     return `<label class="field ${conflict ? "field-conflict" : ""}"><span>${escapeHtml(metric.label)} <small>${escapeHtml(displayUnit(metric.id, snapshot.settings.units))}</small></span><input type="text" inputmode="decimal" autocomplete="off" name="${escapeHtml(metric.id)}" value="${escapeHtml(fieldValue(measurement, metric, draft))}" placeholder="—" aria-describedby="hint-${groupIndex}-${escapeHtml(metric.id)}"><small id="hint-${groupIndex}-${escapeHtml(metric.id)}" class="field-source">${hint}</small></label>`;
   }).join("")}</div></fieldset>`).join("");
@@ -419,7 +426,7 @@ function createCycleView() {
         ${shortcutImportPreview(draft)}
         ${measurementFields(null, draft)}
       </section>
-    <div class="form-footer"><p>Duración máxima: <strong>16 semanas</strong>. Cierra el ciclo para empezar otro.</p><button class="button button-primary button-wide" type="submit">Crear ciclo y guardar medición <span aria-hidden="true">↗</span></button></div>
+    <div class="form-footer"><p>Duración máxima: <strong>16 semanas</strong>. Cierra el ciclo para empezar otro.</p><button class="button button-primary button-wide" type="submit">Crear ciclo y guardar medición <span aria-hidden="true">↗</span></button><button class="text-button cancel-form" type="button" data-action="cancel-form">Cancelar</button></div>
     </form>
   </div>`;
 }
@@ -440,7 +447,7 @@ function measurementFormView() {
     ${conflictMarkup(measurement)}
     <form id="measurement-form" class="form-card" data-cycle-id="${escapeHtml(cycle.id)}" data-measurement-id="${escapeHtml(measurementId)}">
       <section class="form-section"><label class="select-field date-field"><span>Fecha real de la medición</span><input type="date" name="date" value="${escapeHtml(measurementDate)}" min="${escapeHtml(minDate)}" max="${escapeHtml(maxDate)}" required><small>La fecha no cambia la semana prevista del ciclo.</small></label>${shortcutButtonMarkup(draft)}${shortcutImportPreview(draft)}${measurementFields(measurement, draft)}</section>
-      <div class="form-footer"><p>Los valores manuales conservan su origen. Dejar un campo vacío mantiene el valor anterior.</p><button class="button button-primary button-wide" type="submit">${isEdit ? "Guardar cambios" : "Guardar medición"} <span aria-hidden="true">↗</span></button></div>
+      <div class="form-footer"><p>Los valores manuales conservan su origen. Dejar un campo vacío mantiene el valor anterior.</p><button class="button button-primary button-wide" type="submit">${isEdit ? "Guardar cambios" : "Guardar medición"} <span aria-hidden="true">↗</span></button><button class="text-button cancel-form" type="button" data-action="cancel-form">Cancelar</button></div>
     </form>
   </div>`;
 }
@@ -453,7 +460,7 @@ function detailView() {
   const reference = latest && selectReference(measurements, latest, cycle, state.comparison);
   return `<div class="page-stack">
     <button class="back-button" type="button" data-action="navigate" data-view="cycles">← <span>Todos los ciclos</span></button>
-    <section class="detail-hero ${cycle.status === "active" ? "" : "is-closed"}"><div class="cycle-hero-top"><span class="status-pill ${cycle.status === "active" ? "" : "status-complete"}"><i></i>${cycle.status === "active" ? "Ciclo activo" : "Ciclo cerrado"}</span><span class="cycle-type">${escapeHtml(typeLabel(cycle.type))}</span></div><h1>${escapeHtml(typeLabel(cycle.type))}</h1><p>${escapeHtml(displayDate(cycle.startDate))}${cycle.closedAt ? ` — ${escapeHtml(displayDate(cycle.closedAt))}` : ` · Semana ${cycleWeek(cycle.startDate, todayLocalDate())}`}</p>${cycle.status === "active" ? `<div class="detail-actions"><button class="button button-primary" data-action="new-measurement" data-cycle-id="${escapeHtml(cycle.id)}">＋ Registrar medición</button><button class="text-button" data-action="close-cycle" data-cycle-id="${escapeHtml(cycle.id)}">Cerrar ciclo</button></div>` : `<div class="detail-actions"><button class="button button-danger" data-action="delete-cycle" data-cycle-id="${escapeHtml(cycle.id)}">Eliminar ciclo cerrado</button></div>`}</section>
+    <section class="detail-hero ${cycle.status === "active" ? "" : "is-closed"}"><div class="cycle-hero-top"><span class="status-pill ${cycle.status === "active" ? "" : "status-complete"}"><i></i>${cycle.status === "active" ? "Ciclo activo" : "Ciclo cerrado"}</span><span class="cycle-type">${escapeHtml(typeLabel(cycle.type))}</span></div><h1>${escapeHtml(typeLabel(cycle.type))}</h1><p>${escapeHtml(displayDate(cycle.startDate))}${cycle.closedAt ? ` — ${escapeHtml(displayDate(cycle.closedAt))}` : ` · Semana ${cycleWeek(cycle.startDate, todayLocalDate())}`}</p>${cycle.status === "active" ? `<div class="detail-actions"><button class="button button-primary" data-action="new-measurement" data-cycle-id="${escapeHtml(cycle.id)}">＋ Registrar medición</button><button class="text-button" data-action="close-cycle" data-cycle-id="${escapeHtml(cycle.id)}">Cerrar ciclo</button></div>` : ""}</section>
     <section class="comparison-panel"><div class="panel-heading compare-heading"><div><p class="eyebrow">COMPARACIÓN</p><h2>Una referencia real</h2></div><label class="select-wrap"><span class="sr-only">Comparar con</span><select data-action="comparison">${comparisonOptions(cycle, latest || { date: cycle.startDate })}</select><span aria-hidden="true">⌄</span></label></div>${latest && reference ? `<p class="reference-caption">${displayDate(latest.date)} vs. ${displayDate(reference.date)}</p><div class="comparison-rows">${["Weight", "Body Fat Percentage", "Lean Body Mass", "Resting Calories"].map(metric => metricDiffRow(metric, latest, reference)).join("")}</div>` : `<div class="soft-empty compact"><p>${latest ? state.comparison === "start" ? "No hay medición inicial." : "Sin medición para esta semana." : "Este ciclo todavía no tiene mediciones."}</p></div>`}</section>
     ${chartFor(cycle, ["Weight", "Lean Body Mass", "Body Fat Percentage"], "Peso y composición corporal", "Peso y masa libre de grasa en kg · grasa corporal en %")}
     ${chartFor(cycle, ["Resting Calories", "Steps"], "TMB y pasos", "TMB por registro · media de los días con dato por semana del ciclo")}
@@ -463,7 +470,8 @@ function detailView() {
         const week = cycleWeek(cycle.startDate, measurement.date);
         const weight = effectiveObservation(measurement, "Weight");
         const conflicts = Object.entries(measurement.observations).filter(([, items]) => isObservationConflict(items));
-        return `<li><span class="timeline-point ${conflicts.length ? "has-conflict" : ""}"></span><button type="button" class="timeline-entry" data-action="edit-measurement" data-measurement-id="${escapeHtml(measurement.id)}"><span class="timeline-date">${escapeHtml(displayDate(measurement.date))}<i>Semana ${week}</i></span><strong>${weight ? escapeHtml(valueWithUnit("Weight", weight.value)) : "Sin peso"}</strong><small>${Object.keys(measurement.observations).length} métricas${conflicts.length ? " · revisar discrepancia" : ""}</small></button></li>`;
+        const metricCount = Object.values(measurement.observations).filter(items => Array.isArray(items) && items.length).length;
+        return `<li><span class="timeline-point ${conflicts.length ? "has-conflict" : ""}"></span><button type="button" class="timeline-entry" data-action="edit-measurement" data-measurement-id="${escapeHtml(measurement.id)}"><span class="timeline-date">${escapeHtml(displayDate(measurement.date))}<i>Semana ${week}</i></span><strong>${weight ? escapeHtml(valueWithUnit("Weight", weight.value)) : "Sin peso"}</strong><small>${metricCount} métricas${conflicts.length ? " · revisar discrepancia" : ""}</small></button><details class="item-menu measurement-menu"><summary aria-label="Más opciones de la medición">•••</summary><div><button class="danger-menu-item" type="button" data-action="delete-measurement" data-measurement-id="${escapeHtml(measurement.id)}">Eliminar medición</button></div></details></li>`;
       }).join("")}</ol>` : `<div class="soft-empty compact"><p>No hay mediciones en este ciclo.</p></div>`}
     </section>
   </div>`;
@@ -483,6 +491,9 @@ function settingsView() {
 }
 
 function render() {
+  app.querySelectorAll(".chart-wrap[data-chart-id]").forEach(element => {
+    state.chartScroll[element.dataset.chartId] = element.scrollLeft;
+  });
   const content = state.view === "summary" ? summaryView()
     : state.view === "cycles" ? cyclesView()
       : state.view === "settings" ? settingsView()
@@ -490,6 +501,14 @@ function render() {
           : state.view === "measurement-form" ? measurementFormView()
             : state.view === "cycle-detail" ? detailView() : summaryView();
   app.innerHTML = shell(content);
+  app.querySelectorAll(".chart-wrap[data-chart-id]").forEach(element => {
+    const saved = state.chartScroll[element.dataset.chartId];
+    if (saved != null) element.scrollLeft = saved;
+    else {
+      const currentWeek = Number(element.dataset.currentWeek) || 1;
+      element.scrollLeft = Math.max(0, (currentWeek * 58) - element.clientWidth + 64);
+    }
+  });
   if (state.toast && state.toastKind !== "error") {
     window.clearTimeout(render.toastTimer);
     render.toastTimer = window.setTimeout(() => { state.toast = null; render(); }, 5500);
@@ -767,6 +786,21 @@ app.addEventListener("click", async event => {
       render();
       return;
     }
+    if (action === "cancel-form") {
+      const form = button.closest("form");
+      if (!form) return;
+      const draft = state.pendingShortcutDraft;
+      const hasImportedValues = Boolean(draft && (draft.healthObservations || []).length);
+      if (hasImportedValues && !window.confirm("Se descartarán los valores recibidos del Atajo y los cambios de este formulario. ¿Cancelar la medición?")) return;
+      if (repository.pendingImport) await repository.clearPendingImport();
+      const isCreateCycle = form.id === "create-cycle-form";
+      clearStoredShortcutDraft();
+      state.measurementId = null;
+      state.view = isCreateCycle ? "cycles" : "cycle-detail";
+      setToast(hasImportedValues ? "Medición cancelada. Los valores importados se descartaron." : "Formulario cancelado.", "info");
+      render();
+      return;
+    }
     if (action === "new-cycle") { clearStoredShortcutDraft(); state.view = "create-cycle"; state.toast = null; render(); return; }
     if (action === "new-measurement") { clearStoredShortcutDraft(); state.cycleId = button.dataset.cycleId; state.measurementId = null; state.view = "measurement-form"; render(); return; }
     if (action === "edit-measurement") { state.measurementId = button.dataset.measurementId; const item = snapshot.measurements.find(value => value.id === state.measurementId); state.cycleId = item ? item.cycleId : null; state.view = "measurement-form"; render(); return; }
@@ -790,6 +824,23 @@ app.addEventListener("click", async event => {
       state.cycleId = null;
       state.view = "cycles";
       setToast("Ciclo cerrado y sus mediciones eliminados.");
+      render();
+      return;
+    }
+    if (action === "delete-measurement") {
+      const measurement = snapshot.measurements.find(item => item.id === button.dataset.measurementId);
+      if (!measurement) throw new Error("No se encontró la medición.");
+      const cycleMeasurements = allCycleMeasurements(measurement.cycleId);
+      const isBaseline = snapshot.cycles.find(item => item.id === measurement.cycleId)?.baselineMeasurementId === measurement.id;
+      const detail = cycleMeasurements.length === 1
+        ? "El ciclo se quedará sin mediciones iniciales. El siguiente registro será la nueva referencia."
+        : isBaseline ? "Es la referencia inicial; el registro más antiguo que quede pasará a ser el inicio del ciclo." : "";
+      if (!window.confirm(`¿Eliminar la medición del ${displayDate(measurement.date)}? ${detail} Esta acción no se puede deshacer.`)) return;
+      await repository.deleteMeasurement(measurement.id);
+      await reloadState();
+      state.cycleId = measurement.cycleId;
+      state.view = "cycle-detail";
+      setToast(isBaseline ? "Medición eliminada y referencia inicial actualizada." : "Medición eliminada.");
       render();
       return;
     }
@@ -854,6 +905,21 @@ app.addEventListener("change", async event => {
       setToast(`Unidades ${settings.units === "metric" ? "métricas" : "anglosajonas"} seleccionadas.`);
       render();
     } catch (error) { setToast(error.message, "error"); render(); }
+  }
+});
+
+app.addEventListener("scroll", event => {
+  const element = event.target;
+  if (element instanceof HTMLElement && element.matches(".chart-wrap[data-chart-id]")) state.chartScroll[element.dataset.chartId] = element.scrollLeft;
+}, true);
+
+app.addEventListener("keydown", event => {
+  const hero = event.target.closest(".cycle-hero-link");
+  if (hero && (event.key === "Enter" || event.key === " ")) {
+    event.preventDefault();
+    state.cycleId = hero.dataset.cycleId;
+    state.view = "cycle-detail";
+    render();
   }
 });
 

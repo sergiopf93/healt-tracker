@@ -98,6 +98,7 @@ export class RemoteRepository {
   getState() { return this.local.getState(); }
   createCycleWithBaseline(...args) { return this.mutate("createCycleWithBaseline", ...args); }
   saveMeasurement(...args) { return this.mutate("saveMeasurement", ...args); }
+  deleteMeasurement(...args) { return this.mutate("deleteMeasurement", ...args); }
   closeCycle(...args) { return this.mutate("closeCycle", ...args); }
   deleteCycle(...args) { return this.mutate("deleteCycle", ...args); }
   importHealthData(...args) { return this.mutate("importHealthData", ...args); }

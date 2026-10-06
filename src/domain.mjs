@@ -98,12 +98,13 @@ function isPlausibleMetricValue(metricId, value) {
     "Lean Body Mass": [0, 500],
     "Body Fat Percentage": [0, 100],
     "Resting Calories": [0, 10000],
+    Steps: [0, 100000],
     "Body Mass Index": [0, 100],
     Waist: [0, 300],
     Hips: [0, 300],
     Flotadores: [0, 300]
   }[metricId];
-  return Boolean(limits && value > limits[0] && value <= limits[1]);
+  return Boolean(limits && (metricId === "Steps" ? value >= limits[0] : value > limits[0]) && value <= limits[1]);
 }
 
 export function makeObservation({ metric, value, unit, source, sourceName = null, measuredAt = null, fingerprint = null, quality = "measured" }) {

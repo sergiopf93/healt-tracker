@@ -2,6 +2,17 @@ import { parseHealthData } from "../src/integrations/apple-health/parser.mjs";
 const EMPTY_STATE = { cycles: [], measurements: [], settings: { units: "metric" } };
 const MAX_STATE_BYTES = 1_000_000;
 
+function withStepsNodes(state) {
+  let changed = false;
+  const measurements = state.measurements.map(measurement => {
+    const observations = measurement.observations && typeof measurement.observations === "object" ? measurement.observations : {};
+    if (Array.isArray(observations.Steps)) return measurement;
+    changed = true;
+    return { ...measurement, observations: { ...observations, Steps: [] } };
+  });
+  return { state: changed ? { ...state, measurements } : state, changed };
+}
+
 function json(value, status = 200, headers = {}) {
   return new Response(JSON.stringify(value), {
     status,
@@ -36,12 +47,24 @@ function validState(state) {
 
 async function readState(db) {
   const row = await db.prepare("SELECT revision, payload, pending_import FROM health_state WHERE id = 1").first();
-  return row
-    ? { revision: row.revision, state: JSON.parse(row.payload), pendingImport: row.pending_import ? JSON.parse(row.pending_import) : null }
-    : { revision: 0, state: structuredClone(EMPTY_STATE), pendingImport: null };
+  if (!row) return { revision: 0, state: structuredClone(EMPTY_STATE), pendingImport: null };
+  const original = JSON.parse(row.payload);
+  const normalized = withStepsNodes(original);
+  if (!normalized.changed) return { revision: row.revision, state: original, pendingImport: row.pending_import ? JSON.parse(row.pending_import) : null };
+  const migration = await db.prepare(`
+    UPDATE health_state SET revision = revision + 1, payload = ?, updated_at = ?
+    WHERE id = 1 AND revision = ?
+  `).bind(JSON.stringify(normalized.state), new Date().toISOString(), row.revision).run();
+  if (migration.meta && migration.meta.changes === 1) {
+    return { revision: row.revision + 1, state: normalized.state, pendingImport: row.pending_import ? JSON.parse(row.pending_import) : null };
+  }
+  const latest = await db.prepare("SELECT revision, payload, pending_import FROM health_state WHERE id = 1").first();
+  const current = withStepsNodes(JSON.parse(latest.payload)).state;
+  return { revision: latest.revision, state: current, pendingImport: latest.pending_import ? JSON.parse(latest.pending_import) : null };
 }
 
 async function storeState(db, state, expectedRevision) {
+  state = withStepsNodes(state).state;
   const result = await db.prepare(`
     INSERT INTO health_state (id, revision, payload, pending_import, updated_at)
     VALUES (1, 1, ?, NULL, ?)

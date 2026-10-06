@@ -51,6 +51,38 @@ function validateRange(metricId, value) {
   return limits && (metricId === "Steps" ? value >= limits[0] : value > limits[0]) && value <= limits[1];
 }
 
+function weeklyStepsObservation(payload) {
+  if (payload.steps == null) return null;
+  if (!payload.steps || typeof payload.steps !== "object" || Array.isArray(payload.steps)) {
+    throw new Error("El campo steps debe ser un diccionario de fecha a número de pasos.");
+  }
+  const startDate = new Date(`${payload.date}T00:00:00Z`);
+  startDate.setUTCDate(startDate.getUTCDate() - 6);
+  const firstDate = startDate.toISOString().slice(0, 10);
+  const dailyValues = [];
+  for (const [date, value] of Object.entries(payload.steps)) {
+    if (!isValidDateOnly(date)) throw new Error(`La fecha ${date} del nodo steps no es válida.`);
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 100000) {
+      throw new Error(`Los pasos del ${date} deben ser un número entre 0 y 100000.`);
+    }
+    if (date >= firstDate && date <= payload.date) dailyValues.push([date, value]);
+  }
+  if (!dailyValues.length) return null;
+  const average = dailyValues.reduce((sum, [, value]) => sum + value, 0) / dailyValues.length;
+  const measuredAt = payload.date;
+  const fingerprint = [payload.date, "Steps", average.toFixed(8), dailyValues.length, firstDate].join("|");
+  return makeObservation({
+    metric: "Steps",
+    value: average,
+    unit: "pasos/día",
+    source: "apple_health",
+    sourceName: `Fitbit · media de ${dailyValues.length} ${dailyValues.length === 1 ? "día" : "días"}`,
+    measuredAt,
+    fingerprint,
+    quality: "measured"
+  });
+}
+
 export function parseHealthDataParam(search) {
   const params = new URLSearchParams(search || "");
   const values = params.getAll("healthData");
@@ -74,11 +106,13 @@ export function parseHealthData(rawPayload) {
 
   const observations = [];
   const ignored = [];
+  const weeklySteps = weeklyStepsObservation(payload);
   for (const [metricId, item] of Object.entries(data)) {
     if (!HEALTH_KEYS.includes(metricId)) {
       ignored.push(metricId);
       continue;
     }
+    if (metricId === "Steps" && weeklySteps) continue;
     if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error(`El valor de ${metricId} no tiene un formato válido.`);
     if (typeof item.value !== "number" || !Number.isFinite(item.value)) throw new Error(`El valor de ${metricId} debe ser un número válido.`);
     if (!expectedUnit(metricId, item.unit)) throw new Error(`La unidad de ${metricId} no está reconocida.`);
@@ -104,6 +138,7 @@ export function parseHealthData(rawPayload) {
       quality: HEALTH_ESTIMATES.has(metricId) ? "estimated" : "measured"
     }));
   }
+  if (weeklySteps) observations.push(weeklySteps);
   if (!observations.length) throw new Error("No se encontraron métricas compatibles para importar.");
   return { status: "valid", date: payload.date, observations, ignored };
 }

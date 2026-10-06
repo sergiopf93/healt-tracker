@@ -21,7 +21,7 @@ La API es un Cloudflare Worker y el estado de la aplicación se guarda en una ba
 3. El **Deploy command** es `npx wrangler deploy --config ./wrangler.toml`. El `database_id` de `wrangler.toml` debe ser el de la base D1 y el nombre del Worker debe coincidir con `name` en ese archivo.
 4. En **Settings → Variables and Secrets**, crea el secreto `HEALTH_TRACKER_API_KEY` con una clave aleatoria larga. Guárdala en un gestor de contraseñas y no la añadas a archivos del proyecto.
 5. En Health Tracker → **Ajustes → Backend privado**, introduce la URL del Worker y el mismo token. El endpoint desplegado para este proyecto es `https://healt-tracker.sergio-pf93-794.workers.dev`. Hazlo antes de cambiar el Atajo para que la app copie primero los datos locales a D1.
-6. En el Atajo **health-care - Apple Health**, después de generar el JSON añade **Obtener contenido de URL** con método POST a la URL del Worker seguida de `/api/import`. Añade `Authorization: Bearer <token>` como cabecera y un cuerpo JSON con `date` y `data`; `data` puede ser el diccionario de métricas o texto JSON válido. La acción de envío puede quedar al final.
+6. En el Atajo **health-care - Apple Health**, después de generar el JSON añade **Obtener contenido de URL** con método POST a la URL del Worker seguida de `/api/import`. Añade `Authorization: Bearer <token>` como cabecera y un cuerpo JSON con `date` y `data`; `data` puede ser el diccionario de métricas o texto JSON válido. Opcionalmente, incluye `steps` como diccionario `{ "YYYY-MM-DD": pasos }` con los datos diarios de Fitbit. La app calcula la media de los días disponibles entre la fecha del registro y los seis días anteriores. La acción de envío puede quedar al final.
 
 `APP_ORIGIN` en `wrangler.toml` debe coincidir con el origen HTTPS de GitHub Pages (solo dominio, sin la ruta `/healt-tracker/`). El token debe ser el mismo en Cloudflare, Ajustes y la cabecera del Atajo. Cada persona con ese token puede leer y modificar los datos, así que no lo compartas. Si se borran los datos del sitio, vuelve a introducirlo; los ciclos seguirán en D1.
 
@@ -29,13 +29,13 @@ Al conectar por primera vez, los datos locales se copian a D1 si el backend est�
 
 ## Ciclos y datos
 
-Cada ciclo tiene una medición inicial. Desde Ajustes se puede exportar un backup JSON. Los ciclos cerrados se pueden eliminar con sus mediciones. Los cambios se sincronizan al backend cuando está configurado.
+Cada ciclo tiene una medición inicial. Las mediciones se pueden editar o eliminar desde el menú de tres puntos; si se elimina la referencia inicial, pasa a serlo el registro más antiguo restante. Se puede escribir a mano la media de pasos en cualquier medición. Desde Ajustes se puede exportar un backup JSON. Los ciclos cerrados se pueden eliminar con sus mediciones. Los cambios se sincronizan al backend cuando está configurado.
 
-Los tres gráficos comparan: peso, masa libre de grasa y porcentaje de grasa; TMB y media de pasos por semana del ciclo; cintura, cadera y flotadores. Peso y masa comparten escala en kg/lb, grasa corporal usa eje secundario; TMB y pasos también usan ejes separados. La media semanal de pasos incluye solo los días que tienen un dato. Las leyendas permiten resaltar una o varias series.
+Los tres gráficos comparan: peso, masa libre de grasa y porcentaje de grasa; TMB y media de pasos por semana del ciclo; cintura, cadera y flotadores. Se ven las 16 semanas con desplazamiento horizontal; los gráficos de series con unidades diferentes usan escalas verticales independientes, mientras cintura, cadera y flotadores comparten escala. La media semanal de pasos incluye solo los días que tienen un dato. Las leyendas permiten resaltar una o varias series.
 
 ## Apple Health y Atajos
 
-La PWA no accede directamente a HealthKit. El botón abre el atajo existente **health-care - Apple Health** y le pasa la fecha seleccionada. Con el backend conectado, el Atajo envía el JSON a `/api/import`; al volver a la PWA desde el selector de apps, esta consulta Cloudflare automáticamente y espera la importación hasta 45 segundos. Los valores manuales se conservan, los conflictos guardan sus dos orígenes y las importaciones repetidas se deduplican al guardar.
+La PWA no accede directamente a HealthKit. El botón abre el atajo existente **health-care - Apple Health** y le pasa la fecha seleccionada. Con el backend conectado, el Atajo envía el JSON a `/api/import`; al volver a la PWA desde el selector de apps, esta consulta Cloudflare automáticamente y espera la importación hasta 45 segundos. Los valores manuales se conservan, los conflictos guardan sus dos orígenes y las importaciones repetidas se deduplican al guardar. Al leer estados antiguos, el Worker agrega a cada medición un nodo `observations.Steps` vacío si aún no existe; el valor se puede completar manualmente o importar desde Fitbit.
 
 ## Comprobaciones
 

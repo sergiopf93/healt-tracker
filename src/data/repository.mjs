@@ -85,10 +85,51 @@ export class LocalRepository {
   }
 
   async saveMeasurement(measurement) {
-    const tx = this.db.transaction("measurements", "readwrite");
-    tx.objectStore("measurements").put(measurement);
+    const tx = this.db.transaction(["cycles", "measurements"], "readwrite");
+    const measurements = tx.objectStore("measurements");
+    const cycles = tx.objectStore("cycles");
+    measurements.put(measurement);
+    const cycleRequest = cycles.get(measurement.cycleId);
+    cycleRequest.onsuccess = () => {
+      const cycle = cycleRequest.result;
+      if (cycle && !cycle.baselineMeasurementId) cycles.put({ ...cycle, baselineMeasurementId: measurement.id });
+    };
     await transactionDone(tx);
     return measurement;
+  }
+
+  deleteMeasurement(measurementId) {
+    return new Promise((resolve, reject) => {
+      const tx = this.db.transaction(["cycles", "measurements"], "readwrite");
+      const cycles = tx.objectStore("cycles");
+      const measurements = tx.objectStore("measurements");
+      const request = measurements.get(measurementId);
+      let failure = null;
+      request.onsuccess = () => {
+        const measurement = request.result;
+        if (!measurement) {
+          failure = new Error("No se encontró la medición.");
+          tx.abort();
+          return;
+        }
+        const cycleRequest = cycles.get(measurement.cycleId);
+        cycleRequest.onsuccess = () => {
+          const cycle = cycleRequest.result;
+          const listRequest = measurements.index("cycleId").getAll(measurement.cycleId);
+          listRequest.onsuccess = () => {
+            const remaining = listRequest.result.filter(item => item.id !== measurementId).sort((a, b) => a.date.localeCompare(b.date));
+            measurements.delete(measurementId);
+            if (cycle && cycle.baselineMeasurementId === measurementId) cycles.put({ ...cycle, baselineMeasurementId: remaining.length ? remaining[0].id : null });
+          };
+          listRequest.onerror = () => { failure = listRequest.error; tx.abort(); };
+        };
+        cycleRequest.onerror = () => { failure = cycleRequest.error; tx.abort(); };
+      };
+      request.onerror = () => { failure = request.error; tx.abort(); };
+      tx.oncomplete = () => resolve();
+      tx.onabort = () => reject(failure || tx.error || new Error("No se pudo eliminar la medición."));
+      tx.onerror = () => reject(failure || tx.error || new Error("No se pudo eliminar la medición."));
+    });
   }
 
   async closeCycle(cycleId) {

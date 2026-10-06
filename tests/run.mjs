@@ -9,6 +9,7 @@ import { parseHealthData, parseHealthDataParam } from "../src/integrations/apple
 import { APPLE_HEALTH_SHORTCUT_NAME, attachShortcutImport, buildAppleHealthShortcutUrl, createShortcutDraft, isShortcutDraftFresh, manualEntriesFromDraft } from "../src/integrations/apple-health/shortcut.mjs";
 import { LocalRepository, makeExport } from "../src/data/repository.mjs";
 import { RemoteRepository } from "../src/data/remote-repository.mjs";
+import worker from "../backend/worker.mjs";
 
 const tests = [];
 function test(name, fn) { tests.push([name, fn]); }
@@ -55,6 +56,9 @@ test("manual measurements enforce plausible nonzero quantities and preserve blan
   const edited = setManualObservations(saved, { Weight: "", Waist: "82" });
   assert.equal(effectiveObservation(edited, "Weight").value, 72);
   assert.equal(effectiveObservation(edited, "Waist").value, 82);
+  const steps = setManualObservations(base, { Steps: "0" });
+  assert.equal(effectiveObservation(steps, "Steps").value, 0);
+  rejects(() => setManualObservations(base, { Steps: "100001" }), /no es válido/);
 });
 
 test("observation conflicts need a deliberate choice; derived composition stays estimated", () => {
@@ -108,6 +112,27 @@ test("Apple Health JSON parser accepts callback payload and safely canonicalizes
   assert.equal(parsed.observations.find(item => item.metric === "Steps").unit, "pasos/día");
   assert.equal(parseHealthDataParam(`?healthData=${encodeURIComponent(encoded)}`).observations.length, 4);
   assert.equal(parseHealthDataParam("").status, "absent");
+});
+
+test("weekly Fitbit step samples become one editable weekly-average observation", () => {
+  const parsed = parseHealthData(JSON.stringify({
+    date: "2026-10-06",
+    data: { Weight: { value: 70, unit: "kg" } },
+    steps: {
+      "2026-09-29": 90000,
+      "2026-09-30": 1000,
+      "2026-10-01": 2000,
+      "2026-10-02": 3000,
+      "2026-10-06": 5000
+    }
+  }));
+  const steps = parsed.observations.find(item => item.metric === "Steps");
+  assert.equal(steps.value, 2750);
+  assert.equal(steps.unit, "pasos/día");
+  assert.ok(steps.sourceName.includes("Fitbit"));
+  assert.ok(steps.sourceName.includes("4 días"));
+  assert.equal(steps.quality, "measured");
+  assert.equal(parsed.observations.length, 2);
 });
 
 test("Apple Health parser rejects malformed, ambiguous, oversized, and implausible payloads", () => {
@@ -290,6 +315,52 @@ test("remote repository calls the browser fetch with its required global context
     assert.equal(result.url, "https://api.example/api/state");
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("backend lazily adds an empty Steps node to older measurements", async () => {
+  const row = {
+    revision: 4,
+    payload: JSON.stringify({
+      cycles: [],
+      measurements: [{ id: "old-measurement", cycleId: "cycle-1", date: "2026-01-01", observations: { Weight: [] } }],
+      settings: { units: "metric" }
+    }),
+    pending_import: null
+  };
+  const db = {
+    prepare(sql) {
+      return {
+        values: [],
+        bind(...values) { this.values = values; return this; },
+        async first() { return { ...row }; },
+        async run() {
+          const [payload, , expectedRevision] = this.values;
+          if (row.revision !== expectedRevision) return { meta: { changes: 0 } };
+          row.payload = payload;
+          row.revision += 1;
+          return { meta: { changes: 1 } };
+        }
+      };
+    }
+  };
+  const originalResponse = globalThis.Response;
+  globalThis.Response = class ResponseMock {
+    constructor(body, options) { this.body = body; this.status = options.status; }
+    async json() { return JSON.parse(this.body); }
+  };
+  try {
+    const response = await worker.fetch({
+      method: "GET",
+      url: "https://worker.example/api/state",
+      headers: { get: name => name === "Authorization" ? "Bearer test-token" : null }
+    }, { DB: db, HEALTH_TRACKER_API_KEY: "test-token" });
+    const result = await response.json();
+    assert.equal(result.revision, 5);
+    assert.deepEqual(result.state.measurements[0].observations.Steps, []);
+    assert.deepEqual(JSON.parse(row.payload).measurements[0].observations.Steps, []);
+  } finally {
+    globalThis.Response = originalResponse;
   }
 });
 
