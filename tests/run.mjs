@@ -119,20 +119,23 @@ test("weekly Fitbit step samples become one editable weekly-average observation"
     date: "2026-10-06",
     data: { Weight: { value: 70, unit: "kg" } },
     steps: {
-      "2026-09-29": 90000,
+      "2026-09-29": 1500,
       "2026-09-30": 1000,
       "2026-10-01": 2000,
       "2026-10-02": 3000,
-      "2026-10-06": 5000
+      "2026-10-05": 7000
     }
   }));
   const steps = parsed.observations.find(item => item.metric === "Steps");
-  assert.equal(steps.value, 2750);
+  assert.equal(steps.value, 2900);
   assert.equal(steps.unit, "pasos/día");
   assert.ok(steps.sourceName.includes("Fitbit"));
-  assert.ok(steps.sourceName.includes("4 días"));
+  assert.ok(steps.sourceName.includes("5 días"));
   assert.equal(steps.quality, "measured");
   assert.equal(parsed.observations.length, 2);
+  rejects(() => parseHealthData(JSON.stringify({
+    date: "2026-10-06", data: { Weight: { value: 70, unit: "kg" } }, steps: { "2026-10-06": 5000 }
+  })), /anteriores/);
 });
 
 test("Apple Health parser rejects malformed, ambiguous, oversized, and implausible payloads", () => {

@@ -56,21 +56,21 @@ function weeklyStepsObservation(payload) {
   if (!payload.steps || typeof payload.steps !== "object" || Array.isArray(payload.steps)) {
     throw new Error("El campo steps debe ser un diccionario de fecha a número de pasos.");
   }
-  const startDate = new Date(`${payload.date}T00:00:00Z`);
-  startDate.setUTCDate(startDate.getUTCDate() - 6);
-  const firstDate = startDate.toISOString().slice(0, 10);
+  const entries = Object.entries(payload.steps);
+  if (entries.length > 7) throw new Error("El nodo steps puede incluir como máximo los siete días anteriores al registro.");
   const dailyValues = [];
-  for (const [date, value] of Object.entries(payload.steps)) {
+  for (const [date, value] of entries) {
     if (!isValidDateOnly(date)) throw new Error(`La fecha ${date} del nodo steps no es válida.`);
+    if (date >= payload.date) throw new Error("Las fechas del nodo steps deben ser anteriores a la fecha del registro.");
     if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 100000) {
       throw new Error(`Los pasos del ${date} deben ser un número entre 0 y 100000.`);
     }
-    if (date >= firstDate && date <= payload.date) dailyValues.push([date, value]);
+    dailyValues.push([date, value]);
   }
   if (!dailyValues.length) return null;
   const average = dailyValues.reduce((sum, [, value]) => sum + value, 0) / dailyValues.length;
   const measuredAt = payload.date;
-  const fingerprint = [payload.date, "Steps", average.toFixed(8), dailyValues.length, firstDate].join("|");
+  const fingerprint = [payload.date, "Steps", JSON.stringify(dailyValues.sort(([a], [b]) => a.localeCompare(b)))].join("|");
   return makeObservation({
     metric: "Steps",
     value: average,
