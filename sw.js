@@ -1,4 +1,4 @@
-const CACHE_NAME = "health-tracker-shell-v4";
+const CACHE_NAME = "health-tracker-shell-v5";
 const BASE_URL = new URL("./", self.location.href);
 const SHELL_FILES = [
   "./", "./index.html", "./manifest.webmanifest", "./src/main.mjs",
@@ -8,7 +8,7 @@ const SHELL_FILES = [
 ].map(path => new URL(path, BASE_URL).href);
 
 self.addEventListener("install", event => {
-  event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(SHELL_FILES)).then(() => self.skipWaiting()));
+  event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(SHELL_FILES.map(url => new Request(url, { cache: "reload" })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener("activate", event => {
@@ -20,12 +20,21 @@ self.addEventListener("fetch", event => {
   const requestUrl = new URL(request.url);
   if (request.method !== "GET" || requestUrl.origin !== BASE_URL.origin || requestUrl.searchParams.has("healthData")) return;
   if (request.mode === "navigate") {
-    event.respondWith(fetch(request).then(response => response).catch(() => caches.match(new URL("./index.html", BASE_URL).href)));
+    event.respondWith(fetch(request, { cache: "no-cache" }).catch(() => caches.match(new URL("./index.html", BASE_URL).href)));
     return;
   }
   if (!SHELL_FILES.includes(requestUrl.href)) return;
-  event.respondWith(caches.match(requestUrl.href).then(cached => cached || fetch(request).then(response => {
-    if (response.ok) caches.open(CACHE_NAME).then(cache => cache.put(requestUrl.href, response.clone()));
-    return response;
-  })));
+  const responsePromise = fetch(request, { cache: "no-cache" });
+  event.waitUntil(responsePromise.then(async response => {
+    if (response.ok) {
+      const copy = response.clone();
+      const cache = await caches.open(CACHE_NAME);
+      await cache.put(requestUrl.href, copy);
+    }
+  }).catch(() => {}));
+  event.respondWith(responsePromise.catch(async error => {
+    const cached = await caches.match(requestUrl.href);
+    if (cached) return cached;
+    throw error;
+  }));
 });

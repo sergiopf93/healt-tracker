@@ -12,6 +12,8 @@ npm start
 
 Abre `http://localhost:4173`. Para instalarla en iPhone, publica el sitio en HTTPS y en Safari elige **Compartir → Añadir a pantalla de inicio**.
 
+La app consulta primero la red para cargar el código y los estilos actualizados; si no hay conexión, utiliza la copia en caché. El service worker renueva la caché de versiones anteriores al activarse. Tras un despliegue, si una pestaña abierta sigue mostrando la versión anterior, vuelve a cargarla después de que se actualice el service worker.
+
 ## Backend gratuito
 
 La API es un Cloudflare Worker y el estado de la aplicación se guarda en una base D1. El Worker protege cada llamada con un token aleatorio; no se guarda en Git ni se incluye en el código servido por Pages. La app y el Atajo lo conservan localmente/configurado por separado. El nivel gratuito tiene límites diarios; al agotarlos las peticiones dejan de funcionar hasta que se restablezca la cuota. No se necesita activar Workers Paid.

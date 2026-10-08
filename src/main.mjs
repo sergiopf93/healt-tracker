@@ -982,7 +982,7 @@ async function boot() {
     await handleImportCallback();
     render();
     if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
-      navigator.serviceWorker.register(new URL("../sw.js", import.meta.url), { scope: new URL("../", import.meta.url).pathname }).catch(() => {
+      navigator.serviceWorker.register(new URL("../sw.js", import.meta.url), { scope: new URL("../", import.meta.url).pathname, updateViaCache: "none" }).catch(() => {
         setToast("La app funciona, pero no se pudo preparar el modo sin conexión.", "warning");
         render();
       });

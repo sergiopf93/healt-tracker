@@ -1,4 +1,6 @@
 import assert from "assert";
+import { readFile } from "node:fs/promises";
+import { runInNewContext } from "node:vm";
 import {
   cycleWeek, daysBetween, isValidDateOnly, parseLocaleNumber, toCanonical, fromCanonical,
   averageMetricByCycleWeek, createCycleRecord, makeManualBaselineObservations, createMeasurement, makeObservation,
@@ -14,6 +16,46 @@ import worker from "../backend/worker.mjs";
 const tests = [];
 function test(name, fn) { tests.push([name, fn]); }
 function rejects(fn, pattern) { assert.throws(fn, pattern); }
+
+test("service worker refreshes cached assets online and retains offline access", async () => {
+  const handlers = {};
+  const cached = new Map();
+  let offline = false;
+  let fetched = 0;
+  const asset = "https://example.test/health/src/main.mjs";
+  const response = text => ({ ok: true, text, clone() { return response(text); } });
+  cached.set(asset, response("old"));
+  runInNewContext(await readFile(new URL("../sw.js", import.meta.url), "utf8"), {
+    URL,
+    self: { location: { href: "https://example.test/health/sw.js" }, addEventListener: (name, handler) => { handlers[name] = handler; } },
+    caches: { match: async url => cached.get(url), open: async () => ({ put: async (url, value) => cached.set(url, value) }) },
+    fetch: async (request, options) => {
+      fetched += 1;
+      assert.equal(options.cache, "no-cache");
+      if (offline) throw new Error("offline");
+      return response("new");
+    }
+  });
+  async function request(url, mode = "cors", method = "GET") {
+    const tasks = [];
+    let result;
+    handlers.fetch({ request: { url, mode, method }, waitUntil: task => tasks.push(task), respondWith: task => { result = task; } });
+    const value = await result;
+    await Promise.all(tasks);
+    return value;
+  }
+  assert.equal((await request(asset)).text, "new");
+  assert.equal(cached.get(asset).text, "new");
+  offline = true;
+  assert.equal((await request(asset)).text, "new");
+  cached.set("https://example.test/health/index.html", response("offline page"));
+  assert.equal((await request("https://example.test/health/", "navigate")).text, "offline page");
+  const before = fetched;
+  assert.equal(await request("https://api.example.test/api/state"), undefined);
+  assert.equal(await request("https://example.test/health/?healthData=value", "navigate"), undefined);
+  assert.equal(await request(asset, "cors", "POST"), undefined);
+  assert.equal(fetched, before);
+});
 
 test("dates are strict local calendar dates and weeks tolerate missing records", () => {
   assert.equal(isValidDateOnly("2026-02-28"), true);
