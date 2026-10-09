@@ -53,10 +53,15 @@ function validateRange(metricId, value) {
 
 function weeklyStepsObservation(payload) {
   if (payload.steps == null) return null;
-  if (!payload.steps || typeof payload.steps !== "object" || Array.isArray(payload.steps)) {
-    throw new Error("El campo steps debe ser un diccionario de fecha a número de pasos.");
+  let steps = payload.steps;
+  if (typeof steps === "string") {
+    try { steps = JSON.parse(decodeCandidate(steps)); }
+    catch { throw new Error("El campo steps debe contener un objeto JSON válido."); }
   }
-  const entries = Object.entries(payload.steps);
+  if (!steps || typeof steps !== "object" || Array.isArray(steps)) {
+    throw new Error("El campo steps debe ser un diccionario de fecha a número de pasos o texto JSON válido con ese diccionario.");
+  }
+  const entries = Object.entries(steps);
   if (entries.length > 7) throw new Error("El nodo steps puede incluir como máximo los siete días anteriores al registro.");
   const dailyValues = [];
   for (const [date, value] of entries) {

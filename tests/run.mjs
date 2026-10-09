@@ -180,6 +180,34 @@ test("weekly Fitbit step samples become one editable weekly-average observation"
   })), /anteriores/);
 });
 
+test("weekly steps accept shortcut JSON text and retain dictionary validation", () => {
+  const samples = {
+    "2026-09-30": 10130, "2026-10-02": 6273, "2026-10-04": 4468,
+    "2026-10-05": 6694, "2026-10-03": 5485, "2026-10-01": 7505
+  };
+  const parse = steps => parseHealthData(JSON.stringify({
+    date: "2026-10-06", data: JSON.stringify({ Weight: { value: 75.05, unit: "kg" } }), steps
+  }));
+  const expected = parse(samples).observations.find(item => item.metric === "Steps");
+  for (const text of [JSON.stringify(samples), encodeURIComponent(JSON.stringify(samples))]) {
+    const imported = parse(text);
+    const observation = imported.observations.find(item => item.metric === "Steps");
+    assert.equal(imported.observations.length, 2);
+    assert.equal(observation.value, 40555 / 6);
+    assert.equal(observation.fingerprint, expected.fingerprint);
+    const draft = createShortcutDraft({ view: "measurement-form", date: imported.date, values: {} });
+    assert.equal(attachShortcutImport(draft, imported).values.Steps, "6759,17");
+  }
+  for (const invalid of ["", "{no", "null", "[]", "42", '"text"']) {
+    rejects(() => parse(invalid), /steps/);
+  }
+  rejects(() => parse(JSON.stringify({ "2026-10-06": 5000 })), /anteriores/);
+  rejects(() => parse(JSON.stringify({ "2026-10-05": "5000" })), /número/);
+  rejects(() => parse(JSON.stringify({ "2026-10-05": -1 })), /número/);
+  assert.equal(parse("{}").observations.length, 1);
+  assert.equal(parse(JSON.stringify({ "2026-10-05": 0 })).observations.find(item => item.metric === "Steps").value, 0);
+});
+
 test("Apple Health parser rejects malformed, ambiguous, oversized, and implausible payloads", () => {
   rejects(() => parseHealthData("{no"), /JSON/);
   rejects(() => parseHealthData(JSON.stringify({ date: "2026-02-30", data: { Weight: { value: 70, unit: "kg" } } })), /fecha/);
