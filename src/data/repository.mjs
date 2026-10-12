@@ -1,4 +1,4 @@
-import { SCHEMA_VERSION, createId, cycleWeek, todayLocalDate } from "../domain.mjs";
+import { SCHEMA_VERSION, isObservationConflict, createId, cycleWeek, todayLocalDate } from "../domain.mjs";
 
 const DATABASE_NAME = "health-tracker-local";
 const DATABASE_VERSION = 1;
@@ -230,7 +230,7 @@ export class LocalRepository {
               duplicates += 1;
               continue;
             }
-            if (list.some(item => Math.abs(item.value - observation.value) > 1e-7)) conflicts.push(observation.metric);
+            if (isObservationConflict([...list, observation])) conflicts.push(observation.metric);
             list.push(observation);
             added += 1;
           }

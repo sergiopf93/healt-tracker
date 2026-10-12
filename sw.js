@@ -1,4 +1,4 @@
-const CACHE_NAME = "health-tracker-shell-v5";
+const CACHE_NAME = "health-tracker-shell-v6";
 const BASE_URL = new URL("./", self.location.href);
 const SHELL_FILES = [
   "./", "./index.html", "./manifest.webmanifest", "./src/main.mjs",

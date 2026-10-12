@@ -437,6 +437,50 @@ test("backend lazily adds an empty Steps node to older measurements", async () =
   }
 });
 
+test("rounded imports preserve precise values without false conflicts or manual copies", async () => {
+  const observation = makeObservation({ metric: "Weight", value: 72.399997, unit: "kg", source: "apple_health" });
+  const measurement = createMeasurement("c", "2026-01-01", [observation]);
+  const saved = setManualObservations(measurement, { Weight: "72,4" });
+  assert.equal(saved.observations.Weight.length, 1);
+  assert.equal(saved.observations.Weight[0].value, observation.value);
+  const preciseEdit = setManualObservations(saved, { Weight: "72,43" });
+  assert.equal(preciseEdit.observations.Weight.find(item => item.source === "manual").value, 72.43);
+  assert.equal(isObservationConflict([observation, { ...observation, value: 72.4 }]), false);
+  assert.equal(isObservationConflict([observation, { ...observation, value: 72.5 }]), true);
+  const repository = new LocalRepository(new FakeDatabase());
+  const baseline = createCycleRecord({ type: "deficit", startDate: "2026-01-01", baselineObservations: makeManualBaselineObservations({ Weight: "72,4" }) });
+  await repository.createCycleWithBaseline(baseline.cycle, baseline.measurement);
+  const imported = await repository.importHealthData({ date: "2026-01-01", observations: [observation] });
+  assert.deepEqual(imported.conflicts, []);
+  assert.equal(imported.measurement.observations.Weight.length, 2);
+  assert.equal(effectiveObservation(imported.measurement, "Weight").value, 72.4);
+});
+
+test("charts align weeks, share mass scales, separate fat and retain fixed axes", async () => {
+  const source = await readFile(new URL("../src/main.mjs", import.meta.url), "utf8");
+  const chartSource = source.slice(source.indexOf("function chartFor("), source.indexOf("function summaryView("));
+  const domain = await import("../src/domain.mjs");
+  const measurements = ["2026-01-01", "2026-01-07", "2026-01-08", "2026-04-22"].map((date, index) => createMeasurement("c", date,
+    makeManualBaselineObservations({ Weight: String(80 - index), "Lean Body Mass": String(60 - index), "Body Fat Percentage": String(25 - index), Waist: String(90 - index), Hips: String(100 - index), Flotadores: String(95 - index) })));
+  const render = runInNewContext(`${chartSource}; chartFor`, {
+    ...domain, allCycleMeasurements: () => measurements, metricById: id => domain.METRICS.find(metric => metric.id === id),
+    snapshot: { settings: { units: "metric" } }, state: { chartFocus: {} }, numberFormat: new Intl.NumberFormat("es-ES", { maximumFractionDigits: 1 }),
+    escapeHtml: String, displayDate: String, valueWithUnit: (id, value) => String(value)
+  });
+  const cycle = { id: "c", startDate: "2026-01-01", status: "completed", closedAt: "2026-04-22" };
+  const html = render(cycle, ["Weight", "Lean Body Mass", "Body Fat Percentage"], "Peso", "");
+  const groups = [...html.matchAll(/class="chart-series-markup"[^>]*>(.*?)<\/g>/g)].map(match => [...match[1].matchAll(/<circle cx="([^"]+)" cy="([^"]+)"/g)].map(dot => [Number(dot[1]), Number(dot[2])]));
+  assert.deepEqual(groups[0].map(point => point[0]), [29, 29, 87, 899]);
+  assert.ok(groups[0][0][1] < groups[1][0][1], "80 kg must be above 60 kg");
+  assert.ok(groups[2].every(point => point[1] >= 198), "fat belongs in the lower panel");
+  assert.equal((html.match(/class="chart-axis"/g) || []).length, 2);
+  assert.match(html, /<\/svg><\/div><svg class="chart-axis"/);
+  assert.ok(!html.includes("NaN"));
+  const body = render(cycle, ["Waist", "Hips", "Flotadores"], "Medidas", "");
+  assert.match(body, /height="264"/);
+  assert.equal((body.match(/class="chart-axis"/g) || []).length, 1);
+});
+
 (async () => {
   let failed = 0;
   for (const [name, fn] of tests) {

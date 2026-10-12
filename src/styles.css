@@ -121,8 +121,10 @@ h2, h3 { letter-spacing: -.03em; }
 .section-heading h3 { margin: 0 0 4px; font-family: Georgia, "Times New Roman", serif; font-weight: 400; font-size: 19px; }
 .section-heading p { margin: 0; color: #8a928a; font-size: 10px; }
 .chart-count { flex: none; padding: 6px 8px; background: #f4f5f0; border-radius: 999px; }
-.chart-wrap { width: 100%; margin: 12px 0 0; overflow-x: auto; overflow-y: hidden; overscroll-behavior-inline: contain; scrollbar-width: thin; scrollbar-color: #cbd6cb transparent; }
-.chart-wrap svg { display: block; max-width: none; height: 158px; overflow: visible; }
+.chart-frame { display: flex; align-items: flex-start; margin-top: 12px; }
+.chart-axis { flex: 0 0 54px; }
+.chart-wrap { flex: 1; min-width: 0; width: 100%; overflow-x: auto; overflow-y: hidden; overscroll-behavior-inline: contain; scrollbar-width: thin; scrollbar-color: #cbd6cb transparent; }
+.chart-wrap svg { display: block; max-width: none; overflow: hidden; }
 .chart-legend { display: flex; flex-wrap: wrap; gap: 7px 15px; margin: 8px 3px 0; }
 .legend-item { border: 0; background: transparent; display: inline-flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 10px; color: #6f7971; cursor: pointer; transition: color .16s ease, opacity .16s ease; }
 .legend-item i { width: 8px; height: 8px; border-radius: 50%; background: var(--series-color, #7886a0); }

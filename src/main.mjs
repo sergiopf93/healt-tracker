@@ -3,7 +3,7 @@ import {
   averageMetricByCycleWeek, deriveMetrics, displayUnit, effectiveObservation, fromCanonical, isObservationConflict,
   isValidDateOnly, makeManualBaselineObservations, observationValues, percentageChange,
   difference, parseLocaleNumber, resolveObservation, selectReference, setManualObservations,
-  toCanonical, todayLocalDate
+  sameMetricValue, toCanonical, todayLocalDate
 } from "./domain.mjs";
 import { createRepository, makeExport } from "./data/repository.mjs";
 import { readRemoteConfig, RemoteRepository, REMOTE_CONFIG_KEY } from "./data/remote-repository.mjs";
@@ -174,44 +174,45 @@ function readingSummary(measurement) {
 function chartFor(cycle, metricIds, title, subtitle) {
   const measurements = allCycleMeasurements(cycle.id);
   const colors = ["#c87557", "#5f8271", "#7886a0", "#d0a85e"];
-  const left = 42, top = 18, bottom = 132, weekWidth = 58;
+  const composition = metricIds.includes("Body Fat Percentage");
+  const bodyMeasures = metricIds.every(id => metricById(id)?.dimension === "length");
+  const left = 0, top = 24, bottom = bodyMeasures ? 234 : 152, weekWidth = 58;
   const plotWidth = 16 * weekWidth;
-  const right = left + plotWidth;
-  const axisRight = right + Math.max(0, metricIds.length - 1) * 48 + 8;
-  const svgWidth = axisRight + 8;
+  const right = plotWidth;
+  const svgWidth = plotWidth;
+  const chartBottom = composition ? 270 : bottom;
+  const height = chartBottom + 30;
   const series = metricIds.map((metricId, seriesIndex) => {
     const values = metricId === "Steps"
-      ? averageMetricByCycleWeek(measurements, metricId, cycle.startDate).map(point => ({ metricId, week: point.week, value: point.value, count: point.count, dayOffset: (point.week - 0.5) * 7 }))
+      ? averageMetricByCycleWeek(measurements, metricId, cycle.startDate).map(point => ({ metricId, week: point.week, value: point.value, count: point.count }))
       : measurements.flatMap(measurement => {
         const observation = effectiveObservation(measurement, metricId);
-        return observation ? [{ metricId, measurement, value: observation.value, week: cycleWeek(cycle.startDate, measurement.date), dayOffset: daysBetween(cycle.startDate, measurement.date) }] : [];
-      }).sort((a, b) => a.dayOffset - b.dayOffset);
-    const coords = values.map(point => ({
+        return observation ? [{ metricId, measurement, value: observation.value, week: cycleWeek(cycle.startDate, measurement.date) }] : [];
+      });
+    const coords = values.filter(point => point.week >= 1 && point.week <= 16).map(point => ({
       ...point,
       shown: fromCanonical(metricId, point.value, snapshot.settings.units),
-      x: left + Math.max(0, Math.min(1, point.dayOffset / (16 * 7 - 1))) * (plotWidth - weekWidth / 2)
-    }));
-    const shown = coords.map(point => point.shown);
-    const minimum = shown.length ? Math.min(...shown) : 0;
-    const maximum = shown.length ? Math.max(...shown) : 1;
-    const padding = maximum === minimum ? Math.max(Math.abs(maximum) * 0.04, 0.5) : (maximum - minimum) * 0.18;
-    const domain = [minimum - padding, maximum + padding];
-    for (const point of coords) point.y = bottom - ((point.shown - domain[0]) / (domain[1] - domain[0])) * (bottom - top);
-    return { metricId, color: colors[seriesIndex % colors.length], coords, points: values.length, domain };
+      x: (point.week - 0.5) * weekWidth
+    })).sort((a, b) => a.week - b.week || (a.measurement?.date || "").localeCompare(b.measurement?.date || ""));
+    return { metricId, color: colors[seriesIndex % colors.length], coords, points: coords.length };
   });
-  const dimensions = new Set(metricIds.map(metricId => metricById(metricId)?.dimension));
-  const sharedScale = dimensions.size === 1;
-  if (sharedScale) {
-    const shown = series.flatMap(item => item.coords.map(point => point.shown));
+  const dimensions = [...new Set(metricIds.map(metricId => metricById(metricId)?.dimension))];
+  const sharedScale = dimensions.length === 1;
+  const axisSeries = dimensions.map(dimension => {
+    const group = series.filter(item => metricById(item.metricId).dimension === dimension);
+    const shown = group.flatMap(item => item.coords.map(point => point.shown));
     const minimum = shown.length ? Math.min(...shown) : 0;
     const maximum = shown.length ? Math.max(...shown) : 1;
-    const padding = maximum === minimum ? Math.max(Math.abs(maximum) * 0.04, 0.5) : (maximum - minimum) * 0.18;
-    const domain = [minimum - padding, maximum + padding];
-    for (const item of series) {
-      item.domain = domain;
-      for (const point of item.coords) point.y = bottom - ((point.shown - domain[0]) / (domain[1] - domain[0])) * (bottom - top);
+    const padding = maximum === minimum ? Math.max(Math.abs(maximum) * 0.01, 0.5) : Math.max((maximum - minimum) * 0.08, 0.1);
+    const domain = [Math.max(0, minimum - padding), maximum + padding];
+    const panelTop = composition && dimension === "percent" ? 198 : top;
+    const panelBottom = composition && dimension === "percent" ? chartBottom : bottom;
+    for (const item of group) {
+      Object.assign(item, { domain, panelTop, panelBottom });
+      for (const point of item.coords) point.y = panelBottom - ((point.shown - domain[0]) / (domain[1] - domain[0])) * (panelBottom - panelTop);
     }
-  }
+    return group[0];
+  });
   const points = series.reduce((sum, item) => sum + item.points, 0);
   const chartId = `${cycle.id}-${metricIds.join("-")}`;
   const selected = state.chartFocus[chartId] || [];
@@ -220,21 +221,21 @@ function chartFor(cycle, metricIds, title, subtitle) {
     const pressed = focusActive ? selected.includes(item.metricId) : true;
     return `<button class="legend-item ${pressed ? "" : "is-dimmed"}" type="button" data-action="focus-series" data-chart-id="${escapeHtml(chartId)}" data-series-id="${escapeHtml(item.metricId)}" aria-pressed="${pressed}"><i style="--series-color:${item.color}"></i>${escapeHtml(metricById(item.metricId).label)}</button>`;
   }).join("");
-  const grid = [0, 0.5, 1].map(fraction => {
-    const y = bottom - fraction * (bottom - top);
+  const grid = axisSeries.filter((item, index) => index === 0 || composition).map(item => [0, 0.5, 1].map(fraction => {
+    const y = item.panelBottom - fraction * (item.panelBottom - item.panelTop);
     return `<line x1="${left}" y1="${y}" x2="${right}" y2="${y}" stroke="#e8e7e0" stroke-dasharray="3 5"/>`;
-  }).join("");
-  const axisSeries = sharedScale ? series.slice(0, 1) : series;
-  const axes = axisSeries.map((item, index) => {
-    const x = index === 0 ? left - 5 : right + 5 + (index - 1) * 48;
-    const anchor = index === 0 ? "end" : "start";
-    const values = [1, 0.5, 0].map(fraction => numberFormat.format(item.domain[0] + fraction * (item.domain[1] - item.domain[0])));
-    return `<g fill="${item.color}" font-size="8"><text x="${x}" y="${top + 3}" text-anchor="${anchor}">${values[0]}</text><text x="${x}" y="${(top + bottom) / 2 + 3}" text-anchor="${anchor}">${values[1]}</text><text x="${x}" y="${bottom + 3}" text-anchor="${anchor}">${values[2]}</text></g>`;
-  }).join("");
+  }).join("")).join("");
+  function fixedAxis(side) {
+    const items = axisSeries.filter((item, index) => side === "left" ? index === 0 : index === 1);
+    if (!items.length) return "";
+    const x = side === "left" ? 48 : 4;
+    const anchor = side === "left" ? "end" : "start";
+    return `<svg class="chart-axis" width="54" height="${height}" viewBox="0 0 54 ${height}" aria-hidden="true">${items.map(item => `<g fill="${item.color}" font-size="9"><text x="${x}" y="${item.panelTop - 12}" text-anchor="${anchor}">${escapeHtml(displayUnit(item.metricId, snapshot.settings.units))}</text>${[0, 0.5, 1].map(fraction => `<text x="${x}" y="${item.panelBottom - fraction * (item.panelBottom - item.panelTop) + 3}" text-anchor="${anchor}">${numberFormat.format(item.domain[0] + fraction * (item.domain[1] - item.domain[0]))}</text>`).join("")}</g>`).join("")}</svg>`;
+  }
   const xTicks = Array.from({ length: 16 }, (_, index) => {
     const week = index + 1;
-    const x = left + index * weekWidth + weekWidth / 2;
-    return `<text x="${x}" y="${bottom + 14}" text-anchor="middle" fill="#888980" font-size="9">S${week}</text>`;
+    const x = (week - 0.5) * weekWidth;
+    return `<line x1="${x}" y1="${top}" x2="${x}" y2="${chartBottom}" stroke="#eeeee8"/><text x="${x}" y="${chartBottom + 14}" text-anchor="middle" fill="#888980" font-size="9">S${week}</text>`;
   }).join("");
   const plotted = series.map(item => {
     const segments = [];
@@ -254,14 +255,9 @@ function chartFor(cycle, metricIds, title, subtitle) {
   const list = series.flatMap(item => item.coords.map(point => `<li><span>${escapeHtml(metricById(item.metricId).label)} · semana ${point.week}${point.measurement ? ` · ${escapeHtml(displayDate(point.measurement.date))}` : point.metricId === "Steps" ? ` · media de ${point.count} días` : ""}</span><strong>${escapeHtml(valueWithUnit(item.metricId, point.value))}</strong></li>`)).join("");
   const focusDate = cycle.status === "active" ? todayLocalDate() : cycle.closedAt || measurements[measurements.length - 1]?.date || cycle.startDate;
   const weekNow = Math.min(16, Math.max(1, cycleWeek(cycle.startDate, focusDate)));
-  const unitLabels = axisSeries.map((item, index) => {
-    const x = index === 0 ? left : right + 5 + (index - 1) * 48;
-    const anchor = index === 0 ? "start" : "start";
-    return `<text x="${x}" y="10" fill="${item.color}" font-size="8" text-anchor="${anchor}">${escapeHtml(displayUnit(item.metricId, snapshot.settings.units))}</text>`;
-  }).join("");
   return `<section class="chart-card">
-    <div class="section-heading"><div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(subtitle)} · ${sharedScale ? "escala vertical compartida" : "escalas verticales independientes por serie"}</p></div><span class="chart-count">${points} ${points === 1 ? "dato" : "datos"}</span></div>
-    ${points ? `<div class="chart-wrap" data-chart-id="${escapeHtml(chartId)}" data-current-week="${weekNow}"><svg width="${svgWidth}" height="158" viewBox="0 0 ${svgWidth} 158" role="img" aria-label="${escapeHtml(title)} durante las 16 semanas, con ${sharedScale ? "escala compartida" : "escalas independientes por serie"}."><title>${escapeHtml(title)}</title>${grid}${axes}${xTicks}${plotted}${unitLabels}<text x="${(left + right) / 2}" y="154" text-anchor="middle" fill="#888980" font-size="9">Semana del ciclo</text></svg></div><div class="chart-legend">${legend}</div><details class="chart-data"><summary>Ver mediciones y fechas</summary><ul>${list}</ul></details>` : `<div class="chart-empty"><span aria-hidden="true">⌁</span><p>La evolución aparecerá cuando haya mediciones.</p></div>`}
+    <div class="section-heading"><div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(subtitle)} · ${sharedScale ? "escala vertical compartida" : "escalas por unidad"}</p></div><span class="chart-count">${points} ${points === 1 ? "dato" : "datos"}</span></div>
+    ${points ? `<div class="chart-frame">${fixedAxis("left")}<div class="chart-wrap" data-chart-id="${escapeHtml(chartId)}" data-current-week="${weekNow}"><svg width="${svgWidth}" height="${height}" viewBox="0 0 ${svgWidth} ${height}" role="img" aria-label="${escapeHtml(title)} durante las 16 semanas, con ${sharedScale ? "escala compartida" : "escalas por unidad"}."><title>${escapeHtml(title)}</title>${grid}${xTicks}${plotted}${composition ? `<text x="8" y="184" fill="#7886a0" font-size="10">Grasa corporal (%)</text>` : ""}<text x="${(left + right) / 2}" y="${height - 2}" text-anchor="middle" fill="#888980" font-size="9">Semana del ciclo</text></svg></div>${fixedAxis("right")}</div><div class="chart-legend">${legend}</div><details class="chart-data"><summary>Ver mediciones y fechas</summary><ul>${list}</ul></details>` : `<div class="chart-empty"><span aria-hidden="true">⌁</span><p>La evolución aparecerá cuando haya mediciones.</p></div>`}
   </section>`;
 }
 
@@ -350,7 +346,7 @@ function draftHasConflict(draft, metricId) {
   const metric = metricById(metricId);
   if (parsed === null || !metric) return false;
   const canonical = toCanonical(metricId, parsed, displayUnit(metricId, snapshot.settings.units), snapshot.settings.units);
-  return Math.abs(canonical - incoming.value) > 1e-7;
+  return !sameMetricValue(metricId, canonical, incoming.value, snapshot.settings.units);
 }
 
 function measurementFields(measurement = null, draft = null) {

@@ -128,10 +128,16 @@ export function observationValues(measurement, metricId) {
   return measurement && measurement.observations && measurement.observations[metricId] || [];
 }
 
+export function sameMetricValue(metricId, a, b, system = "metric") {
+  // Compare at the one-decimal precision shown in the measurement UI.
+  const rounded = value => Math.round((fromCanonical(metricId, value, system) + Number.EPSILON) * 10);
+  return Number.isFinite(a) && Number.isFinite(b) && rounded(a) === rounded(b);
+}
+
 export function isObservationConflict(observations = []) {
   if (observations.length < 2) return false;
   const values = observations.map(item => item.value);
-  return values.some(value => Math.abs(value - values[0]) > 1e-7);
+  return values.some(value => !sameMetricValue(observations[0].metric, value, values[0]));
 }
 
 export function effectiveObservation(measurement, metricId) {
@@ -175,8 +181,10 @@ export function setManualObservations(measurement, entries, system = "metric") {
     const list = result.observations[metricId] || (result.observations[metricId] = []);
     const existing = list.find(item => item.source === "manual");
     const previousEffective = effectiveObservation(result, metricId);
-    if (existing && Math.abs(existing.value - value) < 1e-7) continue;
-    if (!existing && previousEffective && Math.abs(previousEffective.value - value) < 1e-7) continue;
+    const unchanged = observation => observation && (Math.abs(observation.value - value) < 1e-7
+      || (valueShown === Math.round(valueShown * 10) / 10 && sameMetricValue(metricId, observation.value, value, system)));
+    if (unchanged(existing)) continue;
+    if (!existing && unchanged(previousEffective)) continue;
     const observation = makeObservation({ metric: metricId, value, unit: metric.unit, source: "manual", quality: "measured" });
     if (existing) list[list.indexOf(existing)] = { ...observation, id: existing.id, createdAt: existing.createdAt };
     else list.push(observation);
